@@ -1,0 +1,11 @@
+**/.claude-plugin/types/
+node_modules/
+trace.log
+.claude/settings.local.json
+timing.log
+.claude/worktrees/
+snapshots/
+shots/
+spike/
+.DS_Store
+package-lock.json

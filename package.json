@@ -1,0 +1,16 @@
+{
+  "name": "graphos-agent-mods-dev",
+  "private": true,
+  "type": "module",
+  "description": "Dev tooling only; the mod itself has no runtime dependencies",
+  "scripts": {
+    "test:unit": "node --test test/unit/*.spec.ts",
+    "test:plugin": "claude plugin test .",
+    "validate": "claude plugin validate .",
+    "vendor": "node scripts/vendor.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "graphql": "^16.14.2"
+  }
+}

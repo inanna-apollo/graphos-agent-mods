@@ -1,0 +1,16 @@
+{
+  "name": "graphos-experiments",
+  "owner": {
+    "name": "Inanna Malick"
+  },
+  "metadata": {
+    "description": "Experimental Claude Code mods for GraphOS Agent Services, shared to try out and not a supported product."
+  },
+  "plugins": [
+    {
+      "name": "graphos-agent-mods",
+      "source": "./",
+      "description": "Experimental Claude Code mods for GraphOS Agent Services: GraphOS Inspector explains each execute call before you approve it, shows what came back, and can auto-approve the reads your trust rules cover."
+    }
+  ]
+}

@@ -1,0 +1,37 @@
+{
+  "name": "graphos-agent-mods",
+  "displayName": "GraphOS Agent Mods",
+  "description": "Experimental Claude Code mods for GraphOS Agent Services. GraphOS Inspector explains each execute call in a docked pane before you approve it, shows what came back with clickable records, and can auto-approve the reads you write trust rules for.",
+  "author": {
+    "name": "Inanna Malick"
+  },
+  "homepage": "https://github.com/inanna-apollo/graphos-agent-mods",
+  "repository": "https://github.com/inanna-apollo/graphos-agent-mods",
+  "license": "Elastic-2.0",
+  "keywords": ["graphos", "graphos-agent-services", "graphql", "permissions", "mod"],
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "atlassianBase": {
+      "type": "string",
+      "title": "Atlassian site",
+      "description": "https URL of your Jira and Confluence cloud site, e.g. https://yourco.atlassian.net; overrides [bases] in links.toml. Empty uses links.toml, and where that names none either, the site is learned from Agent Services responses: a Jira answer shows it in a status's or a priority's icon, so any search that returns status or priority teaches it. A site you set here is never replaced."
+    },
+    "gleanBase": {
+      "type": "string",
+      "title": "Glean site",
+      "description": "https URL of Glean; overrides [bases] in links.toml. Empty uses links.toml."
+    },
+    "slackBase": {
+      "type": "string",
+      "title": "Slack workspace",
+      "description": "https URL of your Slack workspace, e.g. https://yourteam.slack.com; overrides [bases] in links.toml. Empty uses links.toml, and where that names none either, the workspace is learned from Agent Services responses (a Slack response that shows it). A workspace you set here is never replaced.",
+      "default": ""
+    },
+    "extraLinks": {
+      "type": "string",
+      "title": "Extra links (JSON)",
+      "description": "JSON array of link templates, e.g. [{\"label\":\"Open in X\",\"service\":\"x\",\"field\":\"x_search*\",\"arg\":\"query\",\"base\":\"https://x.example\",\"template\":\"{base}/s?q={value}\"}]. base may also be atlassian, glean or slack. Prefer a links.toml override file (/gas links).",
+      "default": ""
+    }
+  }
+}

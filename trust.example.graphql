@@ -1,0 +1,55 @@
+# GraphOS Inspector trust rules: an example. This file is never loaded.
+#
+# Copy what you want to ~/.claude/graphos-agent-mods/trust.graphql and run
+# `/gas trust`. A GraphOS Agent Services execute call then runs without a
+# permission dialog when it fits inside these rules. Anything else asks as usual.
+#
+# Each named query is a rule: the widest read you would approve unasked.
+# A call fits when every root field it selects fits a rule's root of the
+# same name:
+#   - it selects nothing outside the rule's selection (aliases aside);
+#   - a field written here with no selection allows anything below it;
+#   - each argument written here must be set by the call, and allowed:
+#       "text*"    a pattern over the text; * matches any run
+#       50         on a limit argument (first, limit, maxResults, ...):
+#                  at most 50, at least 1; elsewhere, exactly 50
+#       ["a", "b"] each item the call passes must be allowed here
+#       { k: v }   each key written here is checked; others are free
+#       ENUM, true, null   exactly that
+#   - an argument not written here may be anything.
+#
+# Never auto-approved, whatever this file says: a mutation or
+# subscription, a root named for a change (jira_createIssue,
+# confluence_deletePage), any directive but @skip/@include, or anything
+# the mod cannot parse. Agent Services still enforces its own policy on every call:
+# masked and denied fields stay masked and denied.
+#
+# Patterns match text, not meaning: "project = DEV*" also matches
+# "project = DEV OR project = OPS". Write the narrowest shape you need.
+
+# Jira: searches in one project, returning a few chosen fields, in pages.
+query JiraTriage {
+  jira_searchAndReconsileIssuesUsingJql(
+    jql: "project = DEV*"
+    maxResults: 50
+    fields: ["summary", "status", "priority", "assignee", "updated"]
+  ) {
+    issues { id key fields }
+    nextPageToken
+    isLast
+  }
+  jira_countIssues(jql: "project = DEV*") { count }
+}
+
+# Confluence: page searches, titles and excerpts only.
+query DocsLookup {
+  confluence_search(cql: "type = page*", limit: 25) {
+    results { title excerpt url lastModified content { id type } }
+    totalSize
+  }
+}
+
+# Glean: anything a search returns.
+query GleanAnything {
+  glean_search
+}

@@ -1,0 +1,84 @@
+# GraphOS Inspector link mappings: where a result row, or a search, opens.
+#
+# This is the shipped default. To add or change mappings, do not edit this
+# file (an update replaces it): create ~/.claude/graphos-agent-mods/links.toml with
+# only your additions, then run /gas links. Your rules come before these; your
+# [bases] entries replace these.
+
+# Named hosts. Every url below must start with one of these names in braces.
+# A host comes from here, from your links.toml, or from a plugin option, with
+# one exception: where `atlassian` or `slack` is left empty, an Agent Services
+# response that shows your Atlassian site or Slack workspace (a URL on
+# <name>.atlassian.net or <name>.slack.com) fills it. For Atlassian that is a
+# Jira answer's status or priority icon (iconUrl): the `self` URLs in Agent
+# Services' Jira answers go through api.atlassian.com, which names no site. Set one to a
+# site, or to "" in your own links.toml to turn it off, and nothing is learned
+# for it.
+# The atlassianBase, gleanBase and slackBase plugin options override these three.
+[bases]
+atlassian = ""                # your Jira and Confluence site, e.g. https://yourco.atlassian.net; empty is learned from Agent Services' Jira answers (status and priority icons)
+glean = "https://app.glean.com"
+slack = ""                    # your Slack workspace, e.g. https://yourco.slack.com; empty is learned
+incidentio = "https://app.incident.io"
+# Hosts whose links a response carries itself (a permalink, a url, a webUrl):
+# naming the host here is what lets that link open. No rule needed.
+googledocs = "https://docs.google.com"
+googledrive = "https://drive.google.com"
+gong = "https://app.gong.io"
+hubspot = "https://app.hubspot.com"
+ashby = "https://app.ashbyhq.com"
+
+# [[record]]: a result row's link. `service` is the root field's prefix before
+# `_` (`*` for any), `field` the item field holding the value (dotted ok:
+# fields.key), `match` an optional regex the value must fully satisfy, and
+# {value} in `url` the percent-encoded value. The first rule that matches wins.
+[[record]]
+service = "jira"
+field = "key"
+match = "^[A-Z][A-Z0-9_]+-\\d+$"
+url = "{atlassian}/browse/{value}"
+
+[[record]]
+service = "jira"
+field = "fields.key"
+match = "^[A-Z][A-Z0-9_]+-\\d+$"
+url = "{atlassian}/browse/{value}"
+
+[[record]]
+service = "confluence"
+field = "id"
+match = "^\\d{1,20}$"
+url = "{atlassian}/wiki/pages/viewpage.action?pageId={value}"
+
+# A CQL search hit's page is under `content` (its own `url` is relative).
+[[record]]
+service = "confluence"
+field = "content.id"
+match = "^\\d{1,20}$"
+url = "{atlassian}/wiki/pages/viewpage.action?pageId={value}"
+
+# [[search]]: a link for the whole operation, from one root's string argument.
+# `root` is a root field name, or a prefix when it ends in `*`.
+[[search]]
+label = "Open in Confluence"
+service = "confluence"
+root = "confluence_*"
+arg = "cql"
+url = "{atlassian}/wiki/search?cql={value}"
+
+[[search]]
+label = "Open in Jira"
+service = "jira"
+root = "jira_*"
+arg = "jql"
+url = "{atlassian}/issues/?jql={value}"
+
+[[search]]
+label = "Open in Glean"
+service = "glean"
+root = "glean_search"
+arg = "query"
+url = "{glean}/search?q={value}"
+
+# No Slack search link: its web search URL is unconfirmed, and a broken link is worse than none.
+# Messages link to themselves (their permalink, on the slack host above).

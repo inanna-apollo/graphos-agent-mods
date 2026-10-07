@@ -20,7 +20,7 @@ In Claude Code 2.1.290 or later (`claude --version`; `claude update`), with the 
 
 The install asks for four optional settings (your Atlassian, Glean and Slack sites, and extra links): press Enter to skip them all. If `/gas` does not appear, restart Claude Code or run `/reload-plugins`; if it still does not, run `/plugin` and check that the plugin is enabled. An organization can restrict which mods load, and `claude --debug` says when one was not loaded.
 
-To update later: `/plugin`, then graphos-agent-mods on the Installed tab, then Update now (or `claude plugin update graphos-agent-mods@graphos-experiments` in your shell). Updates are not automatic for a marketplace like this one.
+To update later: run `/plugin`, open the Marketplaces tab, select graphos-experiments and choose Update marketplace (it refreshes the listing and updates the plugin), then run `/reload-plugins`. From your shell: `claude plugin marketplace update graphos-experiments`, then `claude plugin update graphos-agent-mods@graphos-experiments`. Updates are not automatic for a marketplace like this one; the same tab can turn auto-update on.
 
 ## What you get
 

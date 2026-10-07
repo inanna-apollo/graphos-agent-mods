@@ -43,14 +43,15 @@ test('the marketplace is graphos-experiments and lists this plugin from the repo
   assert.ok((marketplace.plugins[0]?.description ?? '') !== '')
 })
 
-test('the manifest carries what a listing needs, and the dev-only snapshot options are not offered', () => {
-  const full = JSON.parse(read('.claude-plugin/plugin.json')) as Record<string, unknown> & { userConfig: Record<string, { description: string }> }
+test('the manifest carries what a listing needs, and declares no options, so installing asks nothing', () => {
+  const full = JSON.parse(read('.claude-plugin/plugin.json')) as Record<string, unknown>
   assert.equal(full.repository, 'https://github.com/inanna-apollo/graphos-agent-mods')
   assert.equal(full.homepage, full.repository)
   assert.equal(full.license, 'Elastic-2.0')
   assert.ok(Array.isArray(full.keywords) && full.keywords.length > 0)
   assert.ok(typeof full.description === 'string' && full.description !== '')
-  assert.deepEqual(Object.keys(full.userConfig).sort(), ['atlassianBase', 'extraLinks', 'gleanBase', 'slackBase'])
-  // An empty Atlassian site or Slack workspace is learned from Agent Services responses, and the options say so.
-  for (const option of ['atlassianBase', 'slackBase']) assert.match(full.userConfig[option]?.description ?? '', /learned from Agent Services responses/)
+  // Claude Code asks for every declared option at install: sites are learned or set in links.toml instead.
+  assert.equal(full.userConfig, undefined)
+  // Unversioned: Claude Code versions the plugin by commit, so a push reaches people who update.
+  assert.equal(full.version, undefined)
 })

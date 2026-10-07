@@ -7,11 +7,10 @@
 // tenant hosts: `<name>.atlassian.net`, `<name>.slack.com`. The worst a bad
 // value can do is point links at another tenant of the same vendor, and a
 // link's tip shows its URL before it opens. A site the person set (the
-// plugin's options, their links.toml) always wins.
+// links.toml) always wins.
 
 import type { CallIR } from './ir.ts'
 import { isRecord } from './guards.ts'
-import { BASE_OPTIONS } from './links.ts'
 import type { BaseSource } from './links.ts'
 
 /** The named bases (links.toml `[bases]`) a response can teach. */
@@ -155,7 +154,7 @@ export function hostOf(base: string): string {
   }
 }
 
-/** What each named base is for, in the words of the plugin options. */
+/** What each named base is for. */
 const BASE_TITLE: Readonly<Record<string, string>> = { atlassian: 'Jira and Confluence', slack: 'Slack', glean: 'Glean' }
 /** What a person writes to set one, as an example only. */
 const BASE_EXAMPLE: Readonly<Record<string, string>> = { atlassian: 'https://yourco.atlassian.net', slack: 'https://yourco.slack.com', glean: 'https://app.glean.com' }
@@ -180,9 +179,8 @@ export function describeBases(bases: Readonly<Record<string, string>>, sources: 
     const label = `${name}${Object.hasOwn(BASE_TITLE, name) ? ` (${BASE_TITLE[name]})` : ''}`
     if (source !== 'unset') return `  ${label}: ${bases[name] === '' ? 'no site' : bases[name]} (${SOURCE_WORDS[source]})`
     const example = Object.hasOwn(BASE_EXAMPLE, name) ? BASE_EXAMPLE[name] : 'https://wiki.example.com'
-    const option = Object.hasOwn(BASE_OPTIONS, name) ? BASE_OPTIONS[name] : undefined
-    const learns = (SITE_KEYS as readonly string[]).includes(name) ? ' An Agent Services response that shows it teaches it (/gas setup drafts the question).' : ''
-    return `  ${label}: not set. Set it with ${option === undefined ? '' : `the ${option} plugin option or `}${name} = "${example}" under [bases] in ${where}.${learns}`
+    const learns = (SITE_KEYS as readonly string[]).includes(name) ? ' The first Agent Services response that shows it teaches it.' : ''
+    return `  ${label}: not set. Set it with ${name} = "${example}" under [bases] in ${where}.${learns}`
   })
 }
 

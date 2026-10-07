@@ -18,7 +18,7 @@ In Claude Code 2.1.290 or later (`claude --version`; `claude update`), with the 
 
 `/gas setup` checks the rest and gives the next step for anything missing: the `/permissions` lines for Agent Services' four read-only tools, so the pane can check policy without asking you, and, where your graph has Jira or Slack, one read-only question to send that teaches the mod your sites. Then ask Claude for anything from Agent Services. The pane opens on its own on a wide terminal, or with `/gas`.
 
-The install asks for four optional settings (your Atlassian, Glean and Slack sites, and extra links): press Enter to skip them all. If `/gas` does not appear, restart Claude Code or run `/reload-plugins`; if it still does not, run `/plugin` and check that the plugin is enabled. An organization can restrict which mods load, and `claude --debug` says when one was not loaded.
+The install asks nothing. If `/gas` does not appear, restart Claude Code or run `/reload-plugins`; if it still does not, run `/plugin` and check that the plugin is enabled. An organization can restrict which mods load, and `claude --debug` says when one was not loaded.
 
 To update later: run `/plugin`, open the Marketplaces tab, select graphos-experiments and choose Update marketplace (it refreshes the listing and updates the plugin), then run `/reload-plugins`. From your shell: `claude plugin marketplace update graphos-experiments`, then `claude plugin update graphos-agent-mods@graphos-experiments`. Updates are not automatic for a marketplace like this one; the same tab can turn auto-update on.
 
@@ -119,7 +119,7 @@ For a mutation, the pane's first section says what approving it changes, as a di
 | Command | What it does |
 |---|---|
 | `/gas` | Open the pane on the current or last Agent Services call (Esc hands the keys back and leaves it open; `×` or `ctrl+x x` closes it) |
-| `/gas setup` | Report what the mod needs and the next step for each (see Try it) |
+| `/gas setup` | Say what is left to set up, as numbered steps, or that it is ready (see Try it) |
 | `/gas older` · `/gas newer` · `/gas live` | Step through the last 20 calls |
 | `/gas raw` | Open or close the raw operation and variables |
 | `/gas trust` | Reload your trust rules, list them, and say what was skipped. The only way a saved change to the file takes effect mid-session |
@@ -187,19 +187,19 @@ A record key opens on your own Atlassian site (Jira and Confluence) or Slack wor
 
 **Learned from an Agent Services response.** Where a site is not set, the first Jira, Confluence or Slack response whose own metadata names it teaches it: `<name>.atlassian.net` for Atlassian, `<name>.slack.com` for Slack. Agent Services reaches Jira through Atlassian's API gateway, so a Jira answer names your site in a status's or a priority's icon, which any search that returns `status` or `priority` brings back; Slack names its workspace in a message's permalink. Links people wrote (in a description, a comment, a page or a message) never count. The mod remembers it between sessions and says so once in the transcript: `GraphOS Inspector: record links now open on yourco.atlassian.net, learned from an Agent Services response. /gas links says where each site comes from.` The first response's own records already open there. The limits:
 - **Only a vendor tenant host.** Another host, `http`, a login in the URL, a port, and the vendors' shared hosts (`api.atlassian.net`, `app.slack.com`) teach nothing.
-- **Only where nothing is configured.** A plugin option, an entry in your own `links.toml` (an entry of `""` turns that site off), or a site already learned is never replaced.
+- **Only where nothing is configured.** An entry in your own `links.toml` (an entry of `""` turns that site off), or a site already learned is never replaced.
 - **Only from a response,** under a Jira, Confluence or Slack root, never from what Claude wrote.
 - A site on a custom domain is not learned: set it yourself.
 
-`/gas links` says where each site comes from (a plugin option, your `links.toml`, the shipped default, learned, or not set) and how to set an unset one. `/gas links forget` clears the learned ones; the next response that shows the site teaches it again, unless you set it or turn it off.
+`/gas links` says where each site comes from (your `links.toml`, the shipped default, learned, or not set) and how to set an unset one. `/gas links forget` clears the learned ones; the next response that shows the site teaches it again, unless you set it or turn it off.
 
-**Set by you.** The `atlassianBase`, `gleanBase` and `slackBase` plugin options (set them in `/plugin`, then graphos-agent-mods), or `[bases]` in your `links.toml` (below). An option comes first, then your `links.toml`, then the shipped default; a learned site only fills a site that none of those sets.
+**Set by you.** `[bases]` in your `links.toml` (below). Your `links.toml` comes first, then the shipped default; a learned site only fills a site that neither sets.
 
 ## Link mappings (links.toml)
 
 Which entity opens where is data, not code. The shipped defaults are in `links.toml` in the plugin folder: Jira issue keys to `/browse/KEY`, Confluence page ids, and the deep links that open a call's CQL, JQL or Glean search (a Slack message links to itself, by its permalink). They name no Atlassian site or Slack workspace of their own (see Your sites). Links are worked out when the pane draws, so a change applies to older calls too (the transcript's RESULT keeps the links it had when the call ran).
 
-To add or change a mapping, create `~/.claude/graphos-agent-mods/links.toml` (an update replaces the shipped file, never yours). Saving it reloads it and says so in one quiet line (`links.toml reloaded: 12 row rules, 1 skipped`), naming any host it newly lets a click open (`; links now open on wiki.example.com`); `/gas links` reloads both files by hand and says where it looked and what it skipped. Your `[[record]]` rules are tried before the shipped ones, and your `[bases]` replace theirs. The `atlassianBase`, `gleanBase` and `slackBase` plugin options replace both. The `extraLinks` plugin option takes a JSON array of up to 8 search links, each with a `label`, `service`, `field` (a root field name, or a prefix ending in `*`), `arg`, `base` (a named base or an https URL) and `template` (such as `{base}/s?q={value}`), and works like a `[[search]]` rule, which is easier to keep.
+To add or change a mapping, create `~/.claude/graphos-agent-mods/links.toml` (an update replaces the shipped file, never yours). Saving it reloads it and says so in one quiet line (`links.toml reloaded: 12 row rules, 1 skipped`), naming any host it newly lets a click open (`; links now open on wiki.example.com`); `/gas links` reloads both files by hand and says where it looked and what it skipped. Your `[[record]]` rules are tried before the shipped ones, and your `[bases]` replace theirs.
 
 ```toml
 [bases]                       # named hosts: https, no credentials; "" turns one off
@@ -220,13 +220,13 @@ arg = "query"
 url = "{wiki}/s?q={value}"
 ```
 
-The file is a strict TOML subset: tables, arrays of tables, strings, booleans, integers and comments. A bad file or entry is skipped, never fatal. A host comes from `[bases]`, a plugin option, or, for the Atlassian site and Slack workspace only, what the mod learned from an Agent Services response (above); it never comes from anything else in call data. A link opens only if it is https and on one of those hosts.
+The file is a strict TOML subset: tables, arrays of tables, strings, booleans, integers and comments. A bad file or entry is skipped, never fatal. A host comes from `[bases]` or, for the Atlassian site and Slack workspace only, what the mod learned from an Agent Services response (above); it never comes from anything else in call data. A link opens only if it is https and on one of those hosts.
 
 ## What the mod will and won't do
 
 - **It never runs a GraphQL operation itself.** It calls only Agent Services' read-only tools (`search`, `introspect`, `validate`, `dry_run`), and only when your settings already allow them. A write's CHANGES come from the call's own arguments: the mod reads no record to show them.
 - **It approves only calls that fit your own trust rules,** and only where you'd otherwise be asked. It never denies or rewrites a call.
-- **Links open only on https hosts** named by your plugin options, your `links.toml` or the shipped `links.toml`, a vendor tenant host the mod learned (above), plus Agent Services' own sign-in links the pane drew.
+- **Links open only on https hosts** named by your `links.toml` or the shipped `links.toml`, a vendor tenant host the mod learned (above), plus Agent Services' own sign-in links the pane drew.
 - **It sends nothing for you.** `/gas setup` and the access-request buttons put a draft in your prompt box for you to read and send.
 - **What it keeps:** the sites it learned, in Claude Code's store for this plugin (`/gas links forget` clears them), and the last 20 calls for the pane, in the session's memory. It writes no file of yours.
 

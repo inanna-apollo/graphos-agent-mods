@@ -15,6 +15,8 @@ const SERVER = 'claude_ai_GraphOS_Agent_Services'
 const GAS_TOOLS = ['execute', 'validate', 'introspect', 'dry_run', 'search'].map(tool => ({ name: `mcp__${SERVER}__${tool}`, description: '', mcp: true }))
 const READ_ONLY = ['search', 'introspect', 'validate', 'dry_run']
 const TRUST_FILE = '/home/me/.claude/graphos-agent-mods/trust.graphql'
+const LINKS_FILE = '/home/me/.claude/graphos-agent-mods/links.toml'
+const BOTH_SITES = '[bases]\natlassian = "https://yourco.atlassian.net"\nslack = "https://yourco.slack.com"\n'
 const SHIPPED = '[bases]\natlassian = ""\nslack = ""\n'
 const ONE_RULE = 'query DocsLookup { confluence_search(cql: "type = page*", limit: 25) { results { title } } }\n'
 
@@ -28,6 +30,8 @@ type Setup = {
   trust?: string
   /** The graph's services, as search lists them; Jira, Confluence and Slack when absent. */
   scopes?: string[]
+  /** The person's own links.toml. */
+  userLinks?: string
 }
 
 /** A session with Agent Services beneath the plugin; every Agent Services call, prompt fill and log line recorded. */
@@ -59,6 +63,7 @@ function world(on: On, setup: Setup = {}) {
   on('process.run', (_, e) => ({ value: { exitCode: 0, stdout: e.argv[0] === 'printenv' ? '/home/me\n' : '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
   on('fs.read', (_, e) => {
     if (e.path === TRUST_FILE && setup.trust !== undefined) return { value: setup.trust }
+    if (e.path === LINKS_FILE && setup.userLinks !== undefined) return { value: setup.userLinks }
     if (e.path.endsWith('/links.toml') && !e.path.includes('/.claude/')) return { value: SHIPPED }
     throw new Error('ENOENT')
   })
@@ -71,15 +76,15 @@ function world(on: On, setup: Setup = {}) {
 const start = ($: Engine) => $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
 const setup = async ($: Engine) => JSON.stringify(await $.command.run({ command: 'gas', args: 'setup', origin: { kind: 'composer' as const }, presentation: { isFullscreen: false, columns: 80 } }))
 
-test('everything in place: the report says so, nothing is drafted, and no Agent Services tool is called', { options: { atlassianBase: 'https://yourco.atlassian.net', slackBase: 'https://yourco.slack.com' } }, async ($, on) => {
-  const seen = world(on, { trust: ONE_RULE })
+const READY = /is ready/
+const STEP = /\b1\. /
+
+test('everything in place: ready, nothing drafted, and no Agent Services tool is called', async ($, on) => {
+  const seen = world(on, { trust: ONE_RULE, userLinks: BOTH_SITES })
   await start($)
   const report = await setup($)
-  expect(report).toContain('Claude Code 2.1.292')
-  expect(report).toContain('connector: found')
-  expect(report).toMatch(/all 4 are allowed/)
-  expect(report).toMatch(/Trust rules \(optional\): 1 loaded/)
-  expect(report).not.toContain('[to do]')
+  expect(report).toMatch(READY)
+  expect(report).not.toMatch(STEP)
   expect(seen.fills).toEqual([])
   expect(seen.gasCalls).toEqual([])
 })
@@ -88,10 +93,10 @@ test('an older Claude Code is told to run claude update, in the report and once 
   const seen = world(on, { version: '2.1.288' })
   await start($)
   await start($)
-  const lines = seen.logs.filter(line => /needs Claude Code 2\.1\.290 or later \(this is 2\.1\.288\)/.test(line))
+  const lines = seen.logs.filter(line => /2\.1\.288/.test(line))
   expect(lines).toHaveLength(1)
   expect(lines[0]).toContain('claude update')
-  expect(await setup($)).toMatch(/2\.1\.288[^"]*claude update/)
+  expect(await setup($)).toContain('claude update')
 })
 
 test('a current Claude Code adds no line at session start', async ($, on) => {
@@ -104,29 +109,26 @@ test('an engine with no version call is told to check it by hand, and the sessio
   const seen = world(on, { version: 'throw' })
   await start($)
   expect(seen.logs.filter(line => /needs Claude Code/.test(line))).toEqual([])
-  expect(await setup($)).toMatch(/claude --version/)
+  expect(await setup($)).toContain('claude --version')
 })
 
 test('no Agent Services connector says how to connect the claude.ai one, and drafts nothing', async ($, on) => {
   const seen = world(on, { tools: [{ name: 'mcp__github__execute', description: '', mcp: true }] })
   await start($)
   const report = await setup($)
-  expect(report).toMatch(/none found/)
-  expect(report).toContain('GraphOS Agent Services')
   expect(report).toContain('claude.ai')
   expect(report).toContain('/mcp')
   expect(seen.fills).toEqual([])
 })
 
-test('a read-only tool that is not allowed gets its exact allow line; the allowed ones do not', async ($, on) => {
-  world(on, { check: tool => (tool === 'introspect' || tool === 'dry_run' ? 'ask' : 'allow') })
+test('a read-only tool that is not allowed gets its exact allow line; the allowed ones and the write tool do not', async ($, on) => {
+  world(on, { check: tool => (tool === 'introspect' || tool === 'dry_run' ? 'ask' : 'allow'), userLinks: BOTH_SITES })
   await start($)
   const report = await setup($)
   expect(report).toContain(`mcp__${SERVER}__introspect`)
   expect(report).toContain(`mcp__${SERVER}__dry_run`)
   expect(report).not.toContain(`mcp__${SERVER}__search`)
   expect(report).not.toContain(`mcp__${SERVER}__validate`)
-  // The write tool is never offered.
   expect(report).not.toContain(`mcp__${SERVER}__execute`)
   expect(report).toContain('/permissions')
 })
@@ -140,30 +142,29 @@ test('an unset site is drafted into the prompt box as a read-only question, afte
   expect(seen.fills[0]?.text).toContain('FindAtlassianSite')
   expect(seen.fills[0]?.text).toContain('FindSlackWorkspace')
   expect(seen.fills[0]?.text).toMatch(/read-only/)
-  expect(report).toMatch(/drafted in your prompt box/)
+  expect(report).toContain('prompt box')
   expect(seen.gasCalls).toEqual(['search'])
 })
 
-test('a graph with no Jira, Confluence or Slack is not asked about them, and has nothing to do for them', async ($, on) => {
+test('a graph with no Jira, Confluence or Slack is not asked about them, and is ready', async ($, on) => {
   const seen = world(on, { scopes: ['salesforce', 'zoom'] })
   await start($)
   const report = await setup($)
   expect(seen.fills).toEqual([])
-  expect(report).toMatch(/not needed, your graph has no Slack service/)
-  expect(report).not.toContain('[to do]')
+  expect(report).toMatch(READY)
 })
 
-test('where search is not allowed, no question is drafted and the report says it waits for search', async ($, on) => {
+test('where search is not allowed, no question is drafted and nothing is called', async ($, on) => {
   const seen = world(on, { check: tool => (tool === 'search' ? 'ask' : 'allow') })
   await start($)
   const report = await setup($)
   expect(seen.fills).toEqual([])
   expect(seen.gasCalls).toEqual([])
-  expect(report).toMatch(/Once search is allowed/)
+  expect(report).toContain(`mcp__${SERVER}__search`)
 })
 
-test('only the site that is unset is asked about', { options: { atlassianBase: 'https://yourco.atlassian.net' } }, async ($, on) => {
-  const seen = world(on)
+test('only the site that is unset is asked about', async ($, on) => {
+  const seen = world(on, { userLinks: '[bases]\natlassian = "https://yourco.atlassian.net"\n' })
   await start($)
   await setup($)
   expect(seen.fills).toHaveLength(1)
@@ -171,17 +172,10 @@ test('only the site that is unset is asked about', { options: { atlassianBase: '
   expect(seen.fills[0]?.text).not.toContain('FindAtlassianSite')
 })
 
-test('a prompt box that refuses the draft is said in the report, with what to do', async ($, on) => {
+test('a prompt box that refuses the draft is said in the report', async ($, on) => {
   const seen = world(on, { isBoxRefusing: true })
   await start($)
   const report = await setup($)
-  expect(report).toMatch(/could not be drafted/)
-  expect(report).toMatch(/close the open dialog/)
+  expect(report).toContain('close the open dialog')
   expect(seen.fills).toEqual([])
-})
-
-test('trust rules are counted from the rules in memory, and with none the report points at the example file', async ($, on) => {
-  world(on)
-  await start($)
-  expect(await setup($)).toMatch(/Trust rules \(optional\): none[^"]*trust\.example\.graphql/)
 })

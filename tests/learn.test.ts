@@ -174,15 +174,6 @@ test('a response that is not Jira, Confluence or Slack data teaches nothing', as
   expect(gas.seen.stored.has('learnedSites')).toBe(false)
 })
 
-test('a site set in the plugin options is never replaced', { options: { atlassianBase: 'https://mine.atlassian.net' } }, async ($, on) => {
-  const gas = world(on, { reply: () => ({ text: jira(`${ON_YOURCO}/rest/api/3/issue/10001`) }) })
-  await start($)
-  const id = await call($, gas)
-  expect(await linkOf($, id)).toBe('https://mine.atlassian.net/browse/DEV-1')
-  expect(told(gas.seen)).toEqual([])
-  expect(gas.seen.stored.has('learnedSites')).toBe(false)
-})
-
 test('a site in the person’s own links.toml is never replaced, and one they turned off stays off', async ($, on) => {
   const named = world(on, { reply: () => ({ text: jira(`${ON_YOURCO}/rest/api/3/issue/10001`) }), userLinks: '[bases]\natlassian = "https://filed.atlassian.net"\n' })
   await start($)
@@ -229,8 +220,6 @@ test('/gas links says where each site comes from, and /gas links forget clears w
   const before = JSON.stringify(await command($, 'links'))
   // Nothing learned yet: the sites are unset and the report says how to set them.
   expect(before).toMatch(/atlassian[^"]*not set/)
-  expect(before).toContain('atlassianBase')
-  expect(before).toContain('slackBase')
 
   await call($, gas)
   const learned = JSON.stringify(await command($, 'links'))

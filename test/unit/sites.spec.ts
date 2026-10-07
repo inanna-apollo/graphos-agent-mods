@@ -155,11 +155,11 @@ test('the sites report names every base with its source, and for an unset one ho
   assert.match(at('glean'), /shipped default/)
   assert.match(at('wiki'), /from your links\.toml/)
   assert.match(at('old'), /turned off by your links\.toml/)
-  // Unset: the option and the file line to write, the file's path, and that a response can teach it.
+  // Unset: the file line to write, the file's path, and that a response can teach it.
   const bare = loadLinkConfig(undefined)
   const slack = describeBases(bare.config.bases, bare.baseSources, '/home/me/.claude/graphos-agent-mods/links.toml').find(line => line.trim().startsWith('slack')) ?? ''
   assert.match(slack, /not set/)
-  assert.match(slack, /slackBase plugin option/)
+  assert.doesNotMatch(slack, /plugin option/)
   assert.match(slack, /slack = "https:\/\/yourco\.slack\.com" under \[bases\] in \/home\/me\/\.claude\/graphos-agent-mods\/links\.toml/)
   assert.match(slack, /Agent Services response.*teaches it/)
   // A base nobody can teach has no such line; an unset base with no option has no option to name.

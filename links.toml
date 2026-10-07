@@ -6,7 +6,7 @@
 # [bases] entries replace these.
 
 # Named hosts. Every url below must start with one of these names in braces.
-# A host comes from here, from your links.toml, or from a plugin option, with
+# A host comes from here or from your links.toml, with
 # one exception: where `atlassian` or `slack` is left empty, an Agent Services
 # response that shows your Atlassian site or Slack workspace (a URL on
 # <name>.atlassian.net or <name>.slack.com) fills it. For Atlassian that is a
@@ -14,7 +14,6 @@
 # Services' Jira answers go through api.atlassian.com, which names no site. Set one to a
 # site, or to "" in your own links.toml to turn it off, and nothing is learned
 # for it.
-# The atlassianBase, gleanBase and slackBase plugin options override these three.
 [bases]
 atlassian = ""                # your Jira and Confluence site, e.g. https://yourco.atlassian.net; empty is learned from Agent Services' Jira answers (status and priority icons)
 glean = "https://app.glean.com"

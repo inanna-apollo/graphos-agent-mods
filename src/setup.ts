@@ -1,11 +1,11 @@
-// What `/gas setup` reports: one line of state and, where something is not
-// done, the next step, for each thing the mod needs. Pure: no $. The hook
-// gathers the facts (the engine's version, the tool list, the permission
-// checks, the link sources, the trust rules); this words them.
+// What `/gas setup` reports: only what is left to do, as numbered steps, or one
+// line saying it is ready. Pure: no $. The hook gathers the facts (the engine's
+// version, the tool list, the permission checks, the link sources, the trust
+// rules); this words them. Where each site comes from is /gas links's to say.
 
 import { escapeText } from './escape.ts'
 import type { BaseSource } from './links.ts'
-import { SITE_KEYS, describeBases, learnable } from './sites.ts'
+import { learnable } from './sites.ts'
 import type { GraphSites, Sites } from './sites.ts'
 import { MIN_CLAUDE_CODE, isOlder, versionNote } from './version.ts'
 
@@ -36,106 +36,81 @@ export type SetupFacts = {
 }
 
 const server = (name: string) => escapeText(name, 200).text
-const list = (names: readonly string[]) => names.join(', ')
+const list = (names: readonly string[]) => (names.length <= 1 ? (names[0] ?? '') : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`)
 
-function versionLines(version: SetupFacts['version']): string[] {
-  if (version === undefined) return [`[to do] Claude Code: its version could not be read here. Run \`claude --version\`; it must be ${MIN_CLAUDE_CODE} or later (\`claude update\` brings it up to date).`]
+/** One step: its first line, then the lines under it. */
+type Step = string[]
+
+export const READY = 'GraphOS Inspector is ready. Ask Claude for anything from GraphOS Agent Services; the pane opens on a wide terminal, or with /gas.'
+
+function versionSteps(version: SetupFacts['version']): Step[] {
+  if (version === undefined) return [[`Check that Claude Code is ${MIN_CLAUDE_CODE} or later (\`claude --version\`; \`claude update\` brings it up to date): its version could not be read here.`]]
   const note = versionNote(version.base, 'GraphOS Agent Mods')
-  if (note !== undefined) return [`[to do] Claude Code ${version.version}: ${note}`]
-  if (version.base !== undefined && isOlder(version.base, MIN_CLAUDE_CODE) === false) return [`[ok] Claude Code ${version.version} (${MIN_CLAUDE_CODE} or later is needed).`]
-  return [`[ok] Claude Code ${version.version} is a development build, so it cannot be compared with ${MIN_CLAUDE_CODE}, the oldest release this was tested on.`]
+  if (note !== undefined) return [[`Update Claude Code: ${note}`]]
+  // A development build cannot be compared; it is not a step.
+  return version.base !== undefined && isOlder(version.base, MIN_CLAUDE_CODE) === true ? [[`Update Claude Code to ${MIN_CLAUDE_CODE} or later (\`claude update\`).`]] : []
 }
 
-function connectorLines(servers: SetupFacts['servers']): string[] {
-  if (servers === undefined) return ['[to do] GraphOS Agent Services connector: Claude Code could not list its tools just now. Run /mcp to see whether the connector is connected, then run /gas setup again.']
-  if (servers.length > 0) return [`[ok] GraphOS Agent Services connector: found${servers.length > 1 ? ` (${servers.length} servers)` : ''}.`]
-  return [
-    '[to do] GraphOS Agent Services connector: none found.',
-    '  Add the "GraphOS Agent Services" connector at claude.ai (Settings, then Connectors) and sign in to it.',
-    '  Claude Code must be signed in to the same claude.ai account (/login); /mcp should then list the connector as connected.',
-    '  Then run /gas setup again. This mod works with GraphOS Agent Services only (a server that offers execute, validate, introspect and dry_run), not with the open-source Apollo MCP Server.',
-  ]
+function connectorSteps(servers: SetupFacts['servers']): Step[] {
+  if (servers === undefined) return [['Check the GraphOS Agent Services connector: Claude Code could not list its tools just now. Run /mcp to see whether it is connected, then /gas setup again.']]
+  if (servers.length > 0) return []
+  return [[
+    'Connect GraphOS Agent Services: add the "GraphOS Agent Services" connector at claude.ai (Settings, then Connectors) and sign in to it. Claude Code must be signed in to the same claude.ai account (/login); /mcp then lists it. Then run /gas setup again.',
+    'This mod works with GraphOS Agent Services only, not the open-source Apollo MCP Server.',
+  ]]
 }
 
-function permissionLines(facts: SetupFacts): string[] {
+function permissionSteps(facts: SetupFacts): { steps: Step[]; notes: string[] } {
+  const steps: Step[] = []
+  const notes: string[] = []
   const servers = facts.servers ?? []
-  if (servers.length === 0) return ['Read-only tools: checked once the connector is found.']
-  const out: string[] = []
   for (const name of servers) {
     const own = facts.tools.filter(one => one.server === name)
-    const allowed = own.filter(one => one.state === 'allow').map(one => one.tool)
     const asks = own.filter(one => one.state === 'ask').map(one => one.tool)
     const denied = own.filter(one => one.state === 'deny').map(one => one.tool)
     const capped = own.filter(one => one.state === 'capped').map(one => one.tool)
-    const label = servers.length > 1 ? ` for ${server(name)}` : ''
-    if (own.length > 0 && allowed.length === own.length) {
-      out.push(`[ok] Read-only tools${label}: all ${own.length} are allowed, so the pane can check access, schema and validity without asking you.`)
-      continue
-    }
-    out.push(`[to do] Read-only tools${label}: ${allowed.length === 0 ? 'none is allowed yet' : `${list(allowed)} ${allowed.length === 1 ? 'is' : 'are'} allowed`}. Without them the pane still shows the parsed call, with access marked as not checked. None of them changes data.`)
+    const label = servers.length > 1 ? ` on ${server(name)}` : ''
     if (asks.length > 0) {
-      out.push(`  Allow ${list(asks)} with /permissions (the Allow tab, Add a new rule) or under permissions.allow in your settings, one line each:`)
-      for (const tool of asks) out.push(`    mcp__${server(name)}__${tool}`)
+      steps.push([
+        `Allow Agent Services' read-only ${asks.length === 1 ? 'tool' : 'tools'}${label} (${list(asks)}), so the pane can check access, schema and validity without asking you. None of them changes data. Run /permissions, open the Allow tab, choose Add a new rule, and add ${asks.length === 1 ? 'this line' : 'each line'}:`,
+        ...asks.map(tool => `  mcp__${server(name)}__${tool}`),
+        'Then run /gas setup again.',
+      ])
     }
-    if (denied.length > 0) out.push(`  ${list(denied)} ${denied.length === 1 ? 'is' : 'are'} denied by a deny rule of yours or your organization's; an allow rule cannot override it, so remove the deny rule if you want the mod to use ${denied.length === 1 ? 'it' : 'them'}.`)
-    if (capped.length > 0) out.push(`  ${list(capped)} ${capped.length === 1 ? 'is' : 'are'} limited by your organization's policy, which a rule of yours cannot widen.`)
+    if (denied.length > 0) steps.push([`Remove the deny rule for ${list(denied)}${label} (yours or your organization's) if you want the pane to use ${denied.length === 1 ? 'it' : 'them'}; an allow rule cannot override a deny.`])
+    if (capped.length > 0) notes.push(`Your organization's policy limits ${list(capped)}${label}, which a rule of yours cannot widen.`)
   }
-  return out
+  return { steps, notes }
 }
 
-const SITE_NAME: Readonly<Record<keyof Sites, string>> = { atlassian: 'Atlassian site', slack: 'Slack workspace' }
-const SITE_SERVICES: Readonly<Record<keyof Sites, string>> = { atlassian: 'Jira or Confluence', slack: 'Slack' }
+const SITE_NAME: Readonly<Record<keyof Sites, string>> = { atlassian: 'Jira and Confluence', slack: 'Slack' }
 
-function siteLines(facts: SetupFacts): string[] {
-  const unset = learnable(facts.sources)
+/** The read-only question that finds the sites, when one was drafted (or could not be). Every other site is learned from the first response that shows it. */
+function siteSteps(facts: SetupFacts): Step[] {
   const graph = facts.graph
-  // A site whose service the graph does not have has nothing to link: a fact, not a step.
-  const absent = graph === undefined ? [] : unset.filter(site => !graph.shown.includes(site))
-  const own = Object.fromEntries(SITE_KEYS.filter(site => !absent.includes(site)).map(site => [site, facts.bases[site] ?? '']))
-  const out = ['Record links (where a record key in the pane opens):', ...describeBases(own, facts.sources, facts.linksFile)]
-  for (const site of absent) out.push(`  ${site}: not needed, your graph has no ${SITE_SERVICES[site]} service.`)
-  const wanted = unset.filter(site => !absent.includes(site))
-  if (wanted.length === 0) return out
-  const named = (sites: readonly (keyof Sites)[]) => sites.map(site => SITE_NAME[site]).join(' and ')
-  const them = (sites: readonly unknown[]) => (sites.length === 1 ? 'it' : 'them')
-  const isAre = (sites: readonly unknown[]) => (sites.length === 1 ? 'is' : 'are')
-  if (facts.servers === undefined || facts.servers.length === 0) {
-    out.push(`[to do] Your ${named(wanted)} ${isAre(wanted)} not set. Connect GraphOS Agent Services first (above) and run /gas setup again, or set ${them(wanted)} as above. Any Agent Services response that shows ${them(wanted)} teaches ${them(wanted)} too.`)
-    return out
-  }
-  if (graph === undefined) {
-    out.push(`[to do] Your ${named(wanted)} ${isAre(wanted)} not set. Once search is allowed (above), /gas setup checks which your graph has and drafts the question that finds ${them(wanted)}. Any Agent Services response that shows ${them(wanted)} teaches ${them(wanted)} too, or set ${them(wanted)} as above.`)
-    return out
-  }
-  const asked = wanted.filter(site => graph.askable.includes(site))
-  const unasked = wanted.filter(site => !asked.includes(site))
-  if (asked.length > 0 && facts.draft?.isDrafted === true) {
-    out.push(`[to do] Your ${named(asked)} ${isAre(asked)} not set. A question is drafted in your prompt box: read it and send it. It asks Agent Services ${asked.length === 1 ? 'a read-only query' : 'read-only queries'} whose answer shows the site; the mod learns it from that answer, not from what Claude says.`)
-  } else if (asked.length > 0 && facts.draft !== undefined && facts.draft.isDrafted === false) {
-    out.push(`[to do] Your ${named(asked)} ${isAre(asked)} not set, and the question that would find ${them(asked)} could not be drafted into the prompt box (${facts.draft.why}). Run /gas setup again, or set ${them(asked)} as above.`)
-  }
-  if (unasked.length > 0) out.push(`[to do] Your ${named(unasked)} ${isAre(unasked)} not set. The first Agent Services response that shows ${them(unasked)} teaches ${them(unasked)}, or set ${them(unasked)} as above.`)
+  if (graph === undefined || facts.draft === undefined) return []
+  const asked = learnable(facts.sources).filter(site => graph.shown.includes(site) && graph.askable.includes(site))
+  if (asked.length === 0) return []
+  const names = asked.length > 1 ? 'Jira, Confluence and Slack' : SITE_NAME[asked[0] ?? 'atlassian']
+  if (facts.draft.isDrafted) return [[`Send the read-only question in your prompt box, so ${names} records open on your own ${asked.length === 1 && asked[0] === 'slack' ? 'workspace' : 'sites'}. The mod learns the site from Agent Services' answer, not from what Claude says.`]]
+  return [[`Run /gas setup again: the read-only question that finds your ${names} ${asked.length === 1 && asked[0] === 'slack' ? 'workspace' : 'sites'} could not be put in your prompt box (${facts.draft.why}).`]]
+}
+
+function trustNotes(trust: SetupFacts['trust']): string[] {
+  const where = trust.file === undefined ? 'trust.graphql' : trust.file
+  const out = trust.count === 0 ? [] : [`Trust rules: ${trust.count} loaded${trust.isOff ? ', switched off for this session (/gas trust on)' : ''}; /gas trust lists them.`]
+  if (trust.isFileChanged) out.push(`${where} was saved since the rules were read: run /gas trust to load it.`)
   return out
 }
 
-function trustLines(trust: SetupFacts['trust']): string[] {
-  const where = trust.file === undefined ? 'your trust.graphql' : trust.file
-  if (trust.count === 0) {
-    return [`[ok] Trust rules (optional): none, so every Agent Services call asks you, as it does without this mod. To let reads you always approve run without a dialog, copy what you want from ${trust.example} to ${where} and run /gas trust.`]
-  }
-  const out = [`[ok] Trust rules (optional): ${trust.count} loaded${trust.isOff ? ', switched off for this session (/gas trust on)' : ''}. /gas trust lists them; ${trust.example} has commented examples.`]
-  if (trust.isFileChanged) out.push(`  ${where} was saved since the rules were read: run /gas trust to load it.`)
-  return out
-}
-
-/** The whole report, for the person to read. */
+/** The whole report, for the person to read: the steps left, else that it is ready. */
 export function setupReport(facts: SetupFacts): string {
-  return [
-    'GraphOS Agent Mods setup',
-    ...versionLines(facts.version),
-    ...connectorLines(facts.servers),
-    ...permissionLines(facts),
-    ...siteLines(facts),
-    ...trustLines(facts.trust),
-  ].join('\n')
+  const connector = connectorSteps(facts.servers)
+  // Nothing past the connector can be checked without one.
+  const permissions = connector.length === 0 ? permissionSteps(facts) : { steps: [], notes: [] }
+  const steps = [...versionSteps(facts.version), ...connector, ...permissions.steps, ...(connector.length === 0 ? siteSteps(facts) : [])]
+  const notes = [...permissions.notes, ...trustNotes(facts.trust)]
+  if (steps.length === 0) return [READY, ...notes].join('\n')
+  const numbered = steps.flatMap((step, index) => [`${index + 1}. ${step[0] ?? ''}`, ...step.slice(1).map(line => `   ${line}`)])
+  return [`GraphOS Inspector setup: ${steps.length === 1 ? 'one step' : `${steps.length} steps`} left.`, '', ...numbered, ...(notes.length === 0 ? [] : ['', ...notes])].join('\n')
 }

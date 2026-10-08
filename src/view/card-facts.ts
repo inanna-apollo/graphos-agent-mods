@@ -146,10 +146,10 @@ export function checkLine(ir: CallIR, counts: { allow: number; mask: number; den
   return `validate ${validation} · dry_run ${mark(checks.policy)}${checks.policy === 'ok' ? ` ${tally}` : ''}${ir.isOperationDenied === true ? ' · operation refused' : ''}`
 }
 
-// ---- Teaching facts: what a type, a value, the badge, a service or a RESULT
-// line means, said from the call, the schema and the outcome alone.
+// ---- Explanations of types, values, badges, services and RESULT lines,
+// derived from the call, schema and outcome.
 
-/** What a card says where the schema has no description: still a fact. */
+/** Card fallback when the schema provides no description. */
 export const NO_DESCRIPTION = 'no description in the schema'
 /** What it says where the schema has not been read. */
 export const NO_SCHEMA = 'the schema has not been read for it'
@@ -303,12 +303,12 @@ export function opFacts(ir: CallIR): string[] {
   const roots = ir.roots.map(root => (root.alias === undefined ? esc(root.name, 120) : `${esc(root.alias, 120)}: ${esc(root.name, 120)}`))
   return [
     `${ir.opType ?? 'query'} ${esc(ir.opName ?? '', 200)}: the name the agent wrote for this operation.`,
-    'GraphQL runs an operation the same under any name, or none: the name is a label, so you can match this pane to what the agent said it would do, and to the permission prompt.',
+    'The operation name is a label for matching the call to the permission prompt. It does not affect execution.',
     `It asks for ${roots.length} root field${roots.length === 1 ? '' : 's'}: ${roots.join(' · ')}`,
   ]
 }
 
-/** What the `summary · Haiku` eyebrow means: who wrote the headline, from what. */
+/** Summary credit: model and input sources. */
 export const CREDIT_FACTS = ['A one-line headline Haiku wrote from the operation and the schema.'] as const
 
 /** What the header's status word means (`✓ ran`, `ran · 2 errors`, `failed`, `1 of 3`). */

@@ -47,7 +47,7 @@ function versionSteps(version: SetupFacts['version']): Step[] {
   if (version === undefined) return [[`Check that Claude Code is ${MIN_CLAUDE_CODE} or later (\`claude --version\`; \`claude update\` brings it up to date): its version could not be read here.`]]
   const note = versionNote(version.base, 'GraphOS Agent Mods')
   if (note !== undefined) return [[`Update Claude Code: ${note}`]]
-  // A development build cannot be compared; it is not a step.
+  // Skip the release comparison for development builds.
   return version.base !== undefined && isOlder(version.base, MIN_CLAUDE_CODE) === true ? [[`Update Claude Code to ${MIN_CLAUDE_CODE} or later (\`claude update\`).`]] : []
 }
 
@@ -56,7 +56,7 @@ function connectorSteps(servers: SetupFacts['servers']): Step[] {
   if (servers.length > 0) return []
   return [[
     'Connect GraphOS Agent Services: add the "GraphOS Agent Services" connector at claude.ai (Settings, then Connectors) and sign in to it. Claude Code must be signed in to the same claude.ai account (/login); /mcp then lists it. Then run /gas setup again.',
-    'This mod works with GraphOS Agent Services only, not the open-source Apollo MCP Server.',
+    'This mod requires GraphOS Agent Services. The open-source Apollo MCP Server does not provide the required Agent Services tools.',
   ]]
 }
 
@@ -92,7 +92,7 @@ function siteSteps(facts: SetupFacts): Step[] {
   const asked = learnable(facts.sources).filter(site => graph.shown.includes(site) && graph.askable.includes(site))
   if (asked.length === 0) return []
   const names = asked.length > 1 ? 'Jira, Confluence and Slack' : SITE_NAME[asked[0] ?? 'atlassian']
-  if (facts.draft.isDrafted) return [[`Send the read-only question in your prompt box, so ${names} records open on your own ${asked.length === 1 && asked[0] === 'slack' ? 'workspace' : 'sites'}. The mod learns the site from Agent Services' answer, not from what Claude says.`]]
+  if (facts.draft.isDrafted) return [[`Send the read-only question in your prompt box to configure links for ${names} records on your ${asked.length === 1 && asked[0] === 'slack' ? 'workspace' : 'sites'}. Agent Services' response supplies the site URL.`]]
   return [[`Run /gas setup again: the read-only question that finds your ${names} ${asked.length === 1 && asked[0] === 'slack' ? 'workspace' : 'sites'} could not be put in your prompt box (${facts.draft.why}).`]]
 }
 

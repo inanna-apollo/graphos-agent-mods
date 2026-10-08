@@ -1,4 +1,4 @@
-// What deserves a quiet mark, decided by the mod and never by the model. Pure: no $.
+// Field annotations derived from operation names, policy and response data. Pure: no $.
 //
 // Exactly three triggers: personal-data field names, policy mask or deny, and
 // a root that writes (a mutation, or a destructive-sounding name). Reasons are

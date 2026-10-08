@@ -2,9 +2,9 @@
 // operation, fragments inlined, @skip/@include applied, aliases resolved to
 // real field names, variables substituted. Pure; never throws.
 //
-// The operation comes from a model that may be prompt-injected, so every
-// ambiguity resolves toward showing more (keep a field whose condition is
-// unknown) or refusing (duplicate fragment names, duplicate input keys).
+// Treat the operation as untrusted input. Keep fields with unknown conditions
+// and reject duplicate fragment names or input keys that would make the
+// normalized result ambiguous.
 
 import { parse, print, Kind } from './vendor/graphql.js'
 import type {

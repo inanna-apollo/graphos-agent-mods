@@ -154,13 +154,10 @@ export function HeaderRule({ ctx, opType }: { ctx: Ctx; opType?: CallIR['opType'
 }
 
 /**
- * The headline, boxed so the eye lands on it: a rounded border in the
- * structure hue (its one saturated use), drawn by hand, with the dim
- * `summary · Haiku` eyebrow on the row above it at its left edge, so the box
- * holds only Haiku's words. They are at full strength, wrapped here to the
- * lines the plan counted, never cut. While Haiku is reading the scale
- * shimmers in the same box; if it failed, the scale shows dim and there is
- * no eyebrow.
+ * The headline in a rounded box, wrapped to the planner's row count.
+ * The `summary · Haiku` credit appears above the box. While the summary is
+ * pending, the fallback line shimmers; after a failure, it stays dim and
+ * has no model credit.
  */
 export function SummaryLine({ ctx, ir, plan }: { ctx: Ctx; ir: CallIR; plan: Plan['summary'] }) {
   const { kit } = ctx
@@ -205,7 +202,7 @@ export function SummaryLine({ ctx, ir, plan }: { ctx: Ctx; ir: CallIR; plan: Pla
   }
   return (
     <Box flexDirection="column">
-      {/* The trust signal, an eyebrow over the box rather than inside it. */}
+      {/* Model credit above the headline box. */}
       {plan.hasCredit && (
         <Text dimColor hover={idHover(cardId.credit())}>
           {creditOf()}

@@ -620,6 +620,8 @@ export const MAX_SAVED = 2_000_000
  */
 export function truncationOf(result: unknown): { chars?: number; path?: string } | undefined {
   const text = textOf(result)
+  // JSON responses can quote an engine notice as ordinary record content.
+  if (text !== undefined && /^\s*(?:\{|\[|")/.test(text)) return undefined
   if (text === undefined || !(/exceeds maximum allowed tokens/i.test(text) || /^\s*<persisted-output>\s*Output too large/i.test(text))) return undefined
   const counted = /\(([\d,]+) characters/.exec(text)?.[1]
   const sized = /Output too large \((\d+(?:\.\d+)?)\s*(B|KB|MB)\)/i.exec(text)
@@ -691,7 +693,7 @@ function unreadableOf(text: string | undefined): CallOutcome {
   return { rows: [], errors: [{ message }], authLinks: [], hasData: false, isUnreadable: true }
 }
 
-export function outcomeOf(ir: CallIR, result: unknown, config: LinkConfig = configOf(undefined)): CallOutcome {
+export function outcomeOf(ir: CallIR, result: unknown, config: LinkConfig = configOf()): CallOutcome {
   const text = textOf(result)
   if (text === undefined) return unreadableOf(undefined)
   let response: unknown
@@ -824,9 +826,9 @@ export function outcomeOf(ir: CallIR, result: unknown, config: LinkConfig = conf
 }
 
 /**
- * The outcome of an oversized result's saved file, read back by the mod: the
- * response in full, though Claude saw only a short preview of it and the file's
- * path. Sized from the file (its weight says it was kept out of the context).
+ * A full response recovered from a saved file or retained content blocks when
+ * Claude received a saved-output notice. Its measured weight is marked as
+ * persisted because Claude saw only the preview and the file's path.
  */
 export function savedOutcome(full: CallOutcome): CallOutcome {
   return full.weight === undefined ? full : { ...full, weight: persistedWeight(full.weight) }

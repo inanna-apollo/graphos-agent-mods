@@ -5,7 +5,7 @@
 // from what lit it.
 import { expect, test } from 'claude-code/testing'
 
-import { renderText, stubKit } from '../src/snapshot/text.ts'
+import { displayWidth, renderText, stubKit } from '../src/snapshot/text.ts'
 import { CLOSED, planFor, viewOf } from '../src/view.tsx'
 import { rowKey } from '../src/view/plan.ts'
 import { walk } from '../src/view/kit.ts'
@@ -73,15 +73,21 @@ const TOTAL_FROM = 32
 
 for (const [name, make] of Object.entries(CALLS)) {
   test(`${name}: the plan counts RESULT's rows, and from ${TOTAL_FROM} columns the whole pane, as they are drawn, at every width to 100`, { timeoutMs: SWEEP_MS }, () => {
+    const call = make()
     for (let columns = 16; columns <= 100; columns++) {
-      const call = make()
       const act = () => undefined
       const plan = planFor(stubKit(), call, columns, CLOSED, act, { surface: 'terminal', links: LINKS })
-      const text = renderText(viewOf(stubKit(), { call, waiting: 0 }, columns, CLOSED, act, { surface: 'terminal', links: LINKS }), columns)
+      const text = renderText(viewOf(stubKit(), { call, waiting: 0 }, columns, CLOSED, act, { surface: 'terminal', links: LINKS }), columns, { clip: false })
       // Labelled by width, so a failure says where.
       // A pending call has no RESULT, and no gap above one.
       expect(`${columns}: ${plan.result.rows === 0 ? 0 : plan.result.rows - plan.gap}`).toBe(`${columns}: ${resultRows(text)}`)
       if (columns >= TOTAL_FROM) expect(`${columns}: ${plan.total}`).toBe(`${columns}: ${text.split('\n').length}`)
+      if (columns >= TOTAL_FROM) {
+        const rows = text.split('\n')
+        for (const row of rows) expect(displayWidth(row)).toBeLessThanOrEqual(columns)
+        expect(plan.anchors.size).toBeGreaterThan(0)
+        for (const [id, place] of plan.anchors) expect(`${columns} ${id}: ${isTriggerAt(id, rows, place, call)}`).toBe(`${columns} ${id}: true`)
+      }
     }
   })
 }
@@ -123,19 +129,27 @@ function isTriggerAt(id: string, rows: readonly string[], at: { row: number; row
 }
 
 /** A root's drawer, a tree name's, and a RESULT row opened out: what is under them moves down by the rows the plan counts for them. */
-const DRAWERS = [CLOSED, { ...CLOSED, field: 'members' }, { ...CLOSED, field: 'open.issues' }, { ...CLOSED, row: rowKey(reviewCall().id, 'open:issues', 1) }, { ...CLOSED, row: rowKey(reviewCall().id, 'members:members', 0) }]
+const DRAWERS = [{ ...CLOSED, field: 'members' }, { ...CLOSED, field: 'open.issues' }, { ...CLOSED, row: rowKey(reviewCall().id, 'open:issues', 1) }, { ...CLOSED, row: rowKey(reviewCall().id, 'members:members', 0) }]
 
 for (const [name, make] of Object.entries(CALLS)) {
-  test(`${name}: each hover card is anchored on the rows its trigger is drawn on, drawers shut or open, at every width from ${TOTAL_FROM} to 100`, { timeoutMs: SWEEP_MS }, () => {
-    for (const ui of DRAWERS) {
+  const call = make()
+  const fields = new Set(walk(call.ir.roots).map(field => field.path))
+  // A drawer for a field or row absent from this fixture redraws CLOSED.
+  // CLOSED's anchors are already covered in the row-count sweep above.
+  const drawers = DRAWERS.filter(ui => ui.field !== null
+    ? fields.has(ui.field)
+    : call.status !== 'pending' && ui.row !== null && ui.row.startsWith(`${call.id}:`) && fields.has(ui.row.includes(':open:issues:') ? 'open.issues' : 'members'))
+  if (drawers.length === 0) continue
+  test(`${name}: open drawers keep each hover card anchored on its trigger's rows at every width from ${TOTAL_FROM} to 100`, { timeoutMs: SWEEP_MS }, () => {
+    for (const ui of drawers) {
       for (let columns = TOTAL_FROM; columns <= 100; columns++) {
-        const call = make()
         const act = () => undefined
         const plan = planFor(stubKit(), call, columns, ui, act, { surface: 'terminal', links: LINKS })
-        const rows = renderText(viewOf(stubKit(), { call, waiting: 0 }, columns, ui, act, { surface: 'terminal', links: LINKS }), columns).split('\n')
+        const rows = renderText(viewOf(stubKit(), { call, waiting: 0 }, columns, ui, act, { surface: 'terminal', links: LINKS }), columns, { clip: false }).split('\n')
         const at = `${columns} ${ui.field ?? ui.row ?? 'shut'}`
         expect(`${at}: ${plan.total}`).toBe(`${at}: ${rows.length}`)
         expect(plan.anchors.size).toBeGreaterThan(0)
+        for (const row of rows) expect(displayWidth(row)).toBeLessThanOrEqual(columns)
         for (const [id, place] of plan.anchors) expect(`${at} ${id}: ${isTriggerAt(id, rows, place, call)}`).toBe(`${at} ${id}: true`)
       }
     }

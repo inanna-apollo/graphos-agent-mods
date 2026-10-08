@@ -24,11 +24,15 @@ export function isDestructiveName(name: string): boolean {
 const WRITES = new Set(['create', 'update', 'add', 'set', 'post', 'send', 'transition', 'assign', 'edit', 'modify', 'move', 'close', 'merge', 'publish', 'invite', 'submit', 'approve', 'reject', 'upsert', 'insert', 'patch', 'put', 'cancel', 'resolve', 'reopen', 'trigger', 'enable', 'disable'])
 
 /**
- * The field's own name (after its service prefix: `createIssue` in
- * `jira_createIssue`) opens with a verb that changes data. Only the opening
- * verb counts, so `issueComments` or `closedIssues` never do.
+ * A write verb opens the field name or an underscore-delimited suffix.
+ * Services may have underscores in their names, so every suffix is checked.
+ * This conservative heuristic may also flag read names containing a write
+ * word, such as `get_issue_update_history`. Match exact verb words so
+ * `issueComments` and `closedIssues` remain unflagged.
  */
 export function isWriteName(name: string): boolean {
-  const first = wordsOf(name.slice(name.lastIndexOf('_') + 1))[0]
-  return first !== undefined && WRITES.has(first)
+  return name.split('_').some(part => {
+    const verb = wordsOf(part)[0]
+    return verb !== undefined && WRITES.has(verb)
+  })
 }

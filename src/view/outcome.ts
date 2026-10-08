@@ -256,7 +256,7 @@ function rootNoun(root: FieldIR, service: string | undefined): string {
  * `first page` when the call set no paging argument) and a short preview of
  * the rows, then the scalars. The rows lines are the first to go.
  */
-export function resultLines(stored: CallOutcome | undefined, ir?: CallIR, links: LinkConfig = configOf(undefined)): ResultLine[] {
+export function resultLines(stored: CallOutcome | undefined, ir?: CallIR, links: LinkConfig = configOf()): ResultLine[] {
   if (stored === undefined) return []
   const outcome = attributed(stored, ir)
   const lines: ResultLine[] = []

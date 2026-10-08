@@ -60,7 +60,7 @@ async function until(clock: MockClock, isDone: () => boolean, ms: number) {
  * while the call waits, as the engine asks before its dialog. The engine's
  * tool beneath is registered before the test first calls $.
  */
-function caller(on: On) {
+function caller(on: On, ceiling?: 'ask' | 'deny' | 'allow') {
   let id: string | undefined
   let release = () => {}
   on('tool.call', { tool: EXECUTE }, async (_, e) => {
@@ -72,7 +72,7 @@ function caller(on: On) {
     id = undefined
     const running = $.tool.call({ tool: EXECUTE, ...input })
     await until(clock, () => id !== undefined, 2_000)
-    const verdict = await $.tool.check({ tool: EXECUTE, input, tool_use_id: id })
+    const verdict = await $.tool.check({ tool: EXECUTE, input, tool_use_id: id, ...(ceiling !== undefined && { ceiling }) })
     release()
     await running
     return verdict
@@ -118,13 +118,27 @@ test('with no rules file nothing changes: the call asks and the pane says nothin
   expect(await (await pane($)).find({ text: /trust rule|asked:/ })).toBeUndefined()
 })
 
-test("the engine's deny or allow stands, whatever the rules say", async ($, on) => {
-  const clock = mock.clock(on)
-  world(on, RULES, 'deny')
-  const checked = caller(on)
-  await start($)
-  expect((await checked($, clock, FITS)).decision).toBe('deny')
-})
+for (const decision of ['deny', 'allow'] as const) {
+  test(`the engine's ${decision} stands, whatever the rules say`, async ($, on) => {
+    const clock = mock.clock(on)
+    world(on, RULES, decision)
+    const checked = caller(on)
+    await start($)
+    expect((await checked($, clock, FITS)).decision).toBe(decision)
+  })
+}
+
+for (const [ceiling, expected] of [['ask', 'ask'], ['deny', 'ask'], ['allow', 'allow']] as const) {
+  test(`trust respects the engine's ${ceiling} ceiling`, async ($, on) => {
+    const clock = mock.clock(on)
+    world(on, RULES)
+    const checked = caller(on, ceiling)
+    await start($)
+    const verdict = await checked($, clock, FITS)
+    expect(verdict.decision).toBe(expected)
+    expect(verdict.ceiling).toBe(ceiling)
+  })
+}
 
 test('/gas trust off makes every call ask; /gas trust lists the rules and their problems', async ($, on) => {
   const clock = mock.clock(on)

@@ -76,7 +76,7 @@ test('the names ops tooling uses are all there', () => {
   assert.equal(EMOJI['+1'], EMOJI.thumbsup)
 })
 
-test('long hostile input is handled quickly and never throws', () => {
+test('long input with repeated delimiters completes quickly and never throws', () => {
   const started = Date.now()
   for (const piece of [':', '::', ':a', ':a:', ':aaaaaaaaaaaaaaaa', '::fire', 'a:x:', ':+1:x', '\u0000:fire']) {
     const text = piece.repeat(Math.ceil(400_000 / piece.length))

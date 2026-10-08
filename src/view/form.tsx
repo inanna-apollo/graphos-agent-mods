@@ -35,7 +35,7 @@ function Arg({ ctx, root, arg, plan }: { ctx: Ctx; root: FieldIR; arg: ArgIR; pl
   const id = `${root.path}(${arg.name})`
   const isFull = ctx.act !== undefined && ctx.ui.arg === id
   const rendered = isFull ? full(arg.value) : renderArg(arg, root.name, ctx.now, ctx.links)
-  // Syntax is quiet, the values the call sets are bold: settled or not.
+  // Render syntax in a subdued color and argument values in bold for every status.
   const toneOf = (tone: keyof typeof TONE) => TONE[tone]
   const lines = rendered.isFallback ? rendered.lines : compact(rendered.lines)
   // The lines left out, the planner's and the renderer's own, are counted under the value: never a `…` on it.

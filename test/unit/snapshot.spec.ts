@@ -22,6 +22,14 @@ test('a row with a flexGrow spacer right-aligns its right side', () => {
   assert.equal(renderText(tree, 20), `left${' '.repeat(11)}right`)
 })
 
+test('layout diagnostics expose overflow while snapshots keep their width', () => {
+  const tree = Box({ paddingLeft: 10, children: Text({ children: 'x' }) })
+  assert.equal(renderText(tree, 5), '     ')
+  const diagnostic = renderText(tree, 5, { clip: false })
+  assert.ok(displayWidth(diagnostic) > 5)
+  assert.ok(diagnostic.includes('x'))
+})
+
 test('truncate-end cuts with an ellipsis within the width', () => {
   const out = renderText(Text({ wrap: 'truncate-end', children: 'a very long line indeed' }), 10)
   assert.equal(out, 'a very lo…')

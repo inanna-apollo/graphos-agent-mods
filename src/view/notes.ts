@@ -1,6 +1,5 @@
-// The notes strip: one short line per unusual fact, from the IR alone (never
-// from the summary). Pure: no $. No note is ever reassurance; with nothing
-// unusual the strip is absent.
+// One short note per detected condition, derived from the IR. The strip is
+// absent when there are no conditions to report. Pure: no $.
 
 import type { CallIR, FieldIR } from '../ir.ts'
 import { LIMIT_ARGS, PLACE_ARGS, esc, limitOf, missingInclude, returnsList, walk } from './kit.ts'

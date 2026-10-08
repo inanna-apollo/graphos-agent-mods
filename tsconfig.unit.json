@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "noUncheckedIndexedAccess": false,
+    "typeRoots": ["./node_modules/@types", "./.claude-plugin/types"]
+  },
+  "include": [".claude-plugin/types", "types", "test/unit"]
+}

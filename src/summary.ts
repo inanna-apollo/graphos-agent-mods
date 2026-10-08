@@ -2,11 +2,9 @@
 // on the answer, a deterministic fallback headline and the cache key. Pure:
 // no $, no Node APIs.
 //
-// Best effort: the pane shows the computed policy, scopes and attention
-// marks, which are the facts. The reply is one short sentence that can only
-// cite fields the IR has. The operation was written by a model that may be
-// prompt-injected and schema descriptions are third-party text, so every
-// untrusted string reaches Haiku only inside a <data> fence.
+// Summaries do not determine policy, scopes or annotations. Operation text
+// and schema descriptions are enclosed in <data> blocks before being sent
+// to Haiku. The response is checked for a usable headline and length.
 
 import { escapeText } from './escape.ts'
 import { isAuxiliaryList, isRecord, limitOf } from './guards.ts'
@@ -136,8 +134,8 @@ export const MAX_TOKENS = 100
 /** Serializes the IR as a numbered outline, with every untrusted string fenced in a <data> block. */
 export function buildPrompt(ir: CallIR): string {
   let prompt = ''
-  // First shorten individual values, then drop deep selections; roots, the
-  // operation type, policy, validation and scopes always stay.
+  // First shorten individual values, then drop deep selections; roots,
+  // operation type and validation always stay.
   for (const valueCap of [2_000, 1_000, 500, 250, 120, 60, 30]) {
     prompt = render(ir, { valueCap, maxDepth: Number.POSITIVE_INFINITY })
     if (prompt.length <= MAX_PROMPT_CHARS) return prompt
@@ -209,8 +207,8 @@ function clean(text: string): string {
 
 /**
  * Parses Haiku's answer. Rejects only when there is no usable headline;
- * anything else the model adds is ignored. The pane shows the computed
- * permissions, so the text is not second-guessed beyond a length bound.
+ * anything else the model adds is ignored. Checks headline length and
+ * escapes controls; permissions are computed separately.
  */
 export function parseSummary(text: string): { summary?: Summary; rejected?: string } {
   // An answer cut off by the token limit has no closed outer object: keep its headline.

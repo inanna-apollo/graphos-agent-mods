@@ -15,9 +15,8 @@ import { COLOR, GLYPH, STRUCT, struct } from './ui/index.tsx'
 import { foldHover, nameHover } from './ui/hover.tsx'
 
 /**
- * The quiet marker before a node the pane marks (src/attention.ts) and whose
- * policy mark does not already say look here: `◆` gray for personal data, the
- * glyph the notes strip uses too; `▴` in the warning hue for a root that writes.
+ * Marker for an annotation from src/attention.ts when there is no policy
+ * marker: gray `◆` for personal data, warning `▴` for a write root.
  */
 export function Attention({ ctx, pinned }: { ctx: Ctx; pinned: Pinned }) {
   return <ctx.kit.Text {...struct(pinned.isPersonal ? STRUCT.personal : COLOR.mask, ctx.isSettled)}>{`${attentionMarker(pinned)} `}</ctx.kit.Text>
@@ -25,8 +24,8 @@ export function Attention({ ctx, pinned }: { ctx: Ctx; pinned: Pinned }) {
 
 /**
  * The policy glyph before a restricted name (`✕ email`, `◐ excerpt`), bold in
- * its policy color, settled or not: the computed permission is the fact the
- * pane exists to show, and a settled name (a Button) cannot carry the color.
+ * its policy color for every call status. Settled names use Buttons, which
+ * cannot carry the policy color, so the glyph is a separate element.
  */
 export function PolicyMark({ ctx, field }: { ctx: Ctx; field: FieldIR }) {
   const mark = policyMark(field)

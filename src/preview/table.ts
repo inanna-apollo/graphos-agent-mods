@@ -1,18 +1,11 @@
-// The hand-mapped writes: how the common Jira, Confluence and Slack mutations
-// read as a change, kept as data. Pure: no $, nothing runs here.
+// Maintained mappings for Jira, Confluence and Slack mutation previews.
+// Pure data: no $ or execution.
 //
-// Per mutation root: what kind of change it is, which arguments name its
-// target, how each argument reads (a value, a body in a format, Jira's opaque
-// `fields` and `update`, a transition, an assignee, a reaction), and what a
-// delete leaves behind. Each one also carries the read that would fetch the
-// record's current state (`read`): its query text and which call argument
-// each of its variables takes. v1 never runs it (the mod's hard rule: it never
-// calls `execute`); it is stored, never run (a read of the current state would
-// be a separate decision that would first change that rule), and unit tests
-// hold it to the read-only floor. Shapes from the Agent Services schema as read on Oct 7
-// 2026.
-//
-// Every word here is ours, never a model's or a schema's.
+// Each root specifies its change kind, target arguments, value/body formats
+// and deletion effects. The optional `read` stores a query and variable
+// bindings for fetching current state. The mod does not run these queries
+// because it does not call `execute`. Unit tests check their read-only shape.
+// Mappings use Agent Services schemas inspected on Oct 7 2026.
 
 import type { BodyFormat } from './flatten.ts'
 

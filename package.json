@@ -3,14 +3,18 @@
   "private": true,
   "type": "module",
   "description": "Dev tooling only; the mod itself has no runtime dependencies",
+  "engines": { "node": ">=22.14.0" },
   "scripts": {
-    "test:unit": "node --test test/unit/*.spec.ts",
+    "test:unit": "node --experimental-strip-types --test test/unit/*.spec.ts",
     "test:plugin": "claude plugin test .",
+    "typecheck": "tsc -p . --noEmit && tsc -p tsconfig.unit.json --noEmit",
     "validate": "claude plugin validate .",
     "vendor": "node scripts/vendor.mjs"
   },
   "devDependencies": {
+    "@types/node": "^22.20.5",
     "esbuild": "^0.28.2",
-    "graphql": "^16.14.2"
+    "graphql": "^16.14.2",
+    "typescript": "^5.9.3"
   }
 }

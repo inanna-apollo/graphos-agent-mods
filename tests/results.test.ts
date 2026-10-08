@@ -38,15 +38,16 @@ const RESPONSE = JSON.stringify({ data: { jira_searchIssues: { issues: ISSUES.ma
 const payload = (value: unknown) => ({ value: { content: [{ type: 'text' as const, text: JSON.stringify(value) }], isError: false } })
 const USAGE = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
 
-type Reply = { text: string; isError?: boolean }
+type Reply = { text: string; isError?: boolean; retained?: string }
 
 /**
  * Agent Services beneath the plugin and the engine's own result row (one Text), counting its drawings by call.
  * `reply` is what the tool answers; `held` leaves the call running until released.
  */
-function world(on: On, options: { reply?: () => Reply; held?: boolean } = {}) {
+function world(on: On, options: { reply?: () => Reply; held?: boolean; saved?: Record<string, string> } = {}) {
   const clock = mock.clock(on)
-  const seen = { argv: [] as string[][], draws: new Map<string, number>(), ids: [] as string[] }
+  const seen = { argv: [] as string[][], draws: new Map<string, number>(), ids: [] as string[], statuses: [] as (string | undefined)[] }
+  on('ui.status', (_, e) => { seen.statuses.push(e.text); return { value: undefined } })
   on('tool.list', () => ({ value: [...GAS_TOOLS, ...GITHUB_TOOLS] }))
   on('tool.check', () => ({ decision: 'allow' as const }))
   on('mcp.call', (_, e) => {
@@ -63,6 +64,7 @@ function world(on: On, options: { reply?: () => Reply; held?: boolean } = {}) {
   })
   on('fs.read', (_, e) => {
     if (e.path === LINKS_FILE) return { value: USER_LINKS }
+    if (options.saved?.[e.path] !== undefined) return { value: options.saved[e.path]! }
     throw new Error('ENOENT')
   })
   // The engine's own drawing of a result row: one line.
@@ -77,7 +79,11 @@ function world(on: On, options: { reply?: () => Reply; held?: boolean } = {}) {
     if (e.tool_use_id !== undefined) seen.ids.push(e.tool_use_id)
     if (options.held === true) await isReleased
     const answer = options.reply?.() ?? { text: RESPONSE }
-    return { result: { content: [{ type: 'text' as const, text: answer.text }], isError: answer.isError === true }, ...(answer.isError === true && { isError: true as const }) }
+    return {
+      ...(answer.retained !== undefined && { text: answer.text }),
+      result: { content: [{ type: 'text' as const, text: answer.retained ?? answer.text }], isError: answer.isError === true },
+      ...(answer.isError === true && { isError: true as const }),
+    }
   })
   on('session.start', () => ({ cwd: '/tmp' }))
   on('command.register', (_, e) => ({ value: { command: e.name } }))
@@ -189,6 +195,32 @@ test('nothing for a call that failed, a response that could not be read, or anot
   expect(await github.find({ text: /engine result/ })).toBeDefined()
   expect(await github.find({ text: /RESULT/ })).toBeUndefined()
 })
+
+for (const retained of [false, true]) {
+  test(`an oversized result flagged errored shows saved records from ${retained ? 'retained blocks' : 'the saved file'}`, async ($, on) => {
+    const saved = '/home/me/.claude/projects/p/s/tool-results/big.json'
+    const stand = `<persisted-output>\nOutput too large (58.2KB). Full output saved to: ${saved}\n\nPreview (first 2KB):\n...\n</persisted-output>`
+    const gas = world(on, {
+      reply: () => ({ text: stand, isError: true, ...(retained && { retained: RESPONSE }) }),
+      saved: retained ? {} : { [saved]: RESPONSE },
+    })
+    await start($)
+    const answer = await $.tool.call({ tool: EXECUTE, operation: OPERATION })
+    expect(answer.isError).toBe(true)
+    expect(JSON.stringify(answer)).toContain('persisted-output')
+    if (retained) expect(JSON.stringify(answer)).toContain('First issue')
+    await settle(gas.clock)
+    const id = gas.seen.ids[0]!
+    const view = await resultRow($, id, { isErrored: true })
+    expect(await view.find({ text: /engine result/ })).toBeDefined()
+    expect(await view.find({ text: /First issue/ })).toBeDefined()
+    expect(await view.find({ text: /saved to a file/ })).toBeDefined()
+    expect(gas.seen.statuses.at(-1)).toMatch(/1 call\b/)
+    expect(gas.seen.statuses.some(line => / read\b/.test(line ?? ''))).toBe(false)
+    const folded = await $.ui.mount({ plugin: 'graphos-agent-mods', surface: 'terminal', component: 'ToolGroup', props: { calls: [groupCall(id, true)], isActive: false, isExpanded: false } })
+    expect(await folded.find({ text: /First issue/ })).toBeDefined()
+  })
+}
 
 test('a settled row keeps its block after it leaves the history, and redraws for no one else’s call', async ($, on) => {
   const gas = world(on)

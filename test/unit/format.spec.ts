@@ -124,7 +124,7 @@ describe('cql and jql', () => {
     assert.ok(out.includes('\\x1b') && out.includes('\\u{202e}'))
     assertRoundTrip(r, input)
   })
-  it('handles a long valid CQL by structure or an honest truncated fallback', () => {
+  it('renders long valid CQL structurally or marks the fallback as truncated', () => {
     const mid = Array.from({ length: 300 }, (_, i) => `field${i} = "value ${i}"`).join(' AND ')
     const r = renderCql(mid)
     assert.equal(r.isFallback, false)
@@ -189,7 +189,7 @@ describe('slack', () => {
     assert.equal(renderSlack(3).isFallback, true)
     assert.equal(renderSlack('   ').isFallback, true)
   })
-  it('escapes hostile text and round-trips', () => {
+  it('escapes control characters and round-trips', () => {
     const input = 'x \x1b[31mred in:#a‮'
     const r = renderSlack(input)
     assert.ok(!text(r).includes('\x1b') && !text(r).includes('‮'))

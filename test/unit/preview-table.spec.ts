@@ -111,8 +111,8 @@ test("a stored read takes the call's values only as variables: each one it decla
   }
 })
 
-test("the floor's own checks refuse what a stored read must never be", () => {
-  // The same checks, on texts a hostile override might try: they fail where the stored ones pass.
+test('stored-read checks identify mutations, write fields and directives', () => {
+  // Apply the stored-read checks to queries containing these unsupported operations.
   assert.equal(parse('mutation X { jira_deleteIssue(issueIdOrKey: "D-1") }', { noLocation: true }).definitions.length, 1)
   const mutation = normalize('mutation X { jira_deleteIssue(issueIdOrKey: "D-1") }', {})
   assert.ok(mutation.ok && mutation.opType === 'mutation')

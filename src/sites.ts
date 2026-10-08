@@ -1,15 +1,12 @@
 // Which Atlassian site and Slack workspace a person's Agent Services reaches, learned
 // from what Agent Services sends back, so record links work with no setup. Pure: no $.
 //
-// A site is taken only from a response (never from what the model wrote), only
-// from a URL field (`self`, `url`, `permalink`, `iconUrl`, `_links.base`, ...) under a Jira,
-// Confluence or Slack root, and only when its host is one of that vendor's
-// tenant hosts: `<name>.atlassian.net`, `<name>.slack.com`. The worst a bad
-// value can do is point links at another tenant of the same vendor, and a
-// link's tip shows its URL before it opens. A site the person set (the
-// links.toml) always wins.
+// Read vendor metadata URL fields (`self`, `url`, `permalink`, `iconUrl`,
+// `_links.base`) under Jira, Confluence or Slack roots. Accept vendor tenant
+// hosts: `<name>.atlassian.net` and `<name>.slack.com`. User content and
+// model text are excluded. Explicit links.toml values take precedence.
 
-import type { CallIR } from './ir.ts'
+import type { CallIR, FieldIR } from './ir.ts'
 import { isRecord } from './guards.ts'
 import type { BaseSource } from './links.ts'
 
@@ -59,10 +56,35 @@ const CONTENT_KEYS = new Set([
 const ICON_OWNERS = new Set(['status', 'priority', 'issuetype'])
 
 /** Whether `key` (under `parent`, at `depth` below the root) is a place the vendor writes its own site. */
-function isSiteKey(site: keyof Sites, key: string, parent: string | undefined, depth: number): boolean {
+function isSiteKey(site: keyof Sites, key: string, parent: string | undefined, depth: number, authTest: boolean): boolean {
   if (site === 'atlassian') return key === 'self' || (key === 'base' && parent === '_links') || (key === 'iconUrl' && parent !== undefined && ICON_OWNERS.has(parent))
   // Slack: the auth test's own `url` (the root object's), and a permalink Slack made for a message.
-  return (key === 'url' && depth === 1) || key === 'permalink'
+  return (key === 'url' && depth === 1 && authTest) || key === 'permalink'
+}
+
+/** Known metadata containers inside JSON scalars; arbitrary JSON keys are content. */
+function metadataKeys(site: keyof Sites, key: string, root: boolean): readonly string[] {
+  if (site === 'slack') {
+    if (root) return ['url', 'permalink', 'messages', 'message', 'matches']
+    if (['messages', 'message', 'matches'].includes(key)) return ['permalink', 'messages', 'matches']
+    return []
+  }
+  if (key === '_links') return ['base']
+  if (ICON_OWNERS.has(key)) return ['self', 'iconUrl']
+  if (key === 'fields') return [...ICON_OWNERS]
+  if (root || ['issues', 'results', 'values'].includes(key)) return ['self', '_links', 'fields', 'issues', 'results', 'values']
+  return []
+}
+
+/** Conflicting aliases have no trustworthy mapping from response key to field. */
+function responseFields(fields: readonly FieldIR[]): FieldIR[] {
+  const names = new Map<string, string | undefined>()
+  for (const field of fields) {
+    const key = field.alias ?? field.name
+    if (!names.has(key)) names.set(key, field.name)
+    else if (names.get(key) !== field.name) names.set(key, undefined)
+  }
+  return fields.filter(field => names.get(field.alias ?? field.name) === field.name)
 }
 
 /** How much of a response is looked through: enough for any real one, bounded for a huge one. */
@@ -93,37 +115,49 @@ export function sitesIn(ir: CallIR, response: unknown): Sites {
   const data = isRecord(response) && isRecord(response.data) ? response.data : undefined
   if (data === undefined) return found
   let nodes = 0
-  const look = (site: keyof Sites, value: unknown, key: string, parent: string | undefined, depth: number) => {
+  const look = (site: keyof Sites, value: unknown, key: string, parent: string | undefined, depth: number, authTest: boolean, field?: FieldIR) => {
     if (found[site] !== undefined || nodes++ > MAX_NODES || depth > MAX_DEPTH) return
+    // Check the real selected field name, including for scalar strings.
+    if (depth > 0 && CONTENT_KEYS.has(key)) return
     if (typeof value === 'string') {
-      if (isSiteKey(site, key, parent, depth)) {
+      if (isSiteKey(site, key, parent, depth, authTest)) {
         const tenant = tenantOf(site, value)
         if (tenant !== undefined) found[site] = tenant
       }
       return
     }
-    // What a person wrote is never where a site is read.
-    if (depth > 0 && CONTENT_KEYS.has(key)) return
     if (Array.isArray(value)) {
-      for (const item of value) look(site, item, key, parent, depth + 1)
+      for (const item of value) look(site, item, key, parent, depth + 1, authTest, field)
       return
     }
-    if (isRecord(value)) for (const [inner, item] of Object.entries(value)) look(site, item, inner, key, depth + 1)
+    if (!isRecord(value)) return
+    if (field !== undefined && field.children.length > 0) {
+      for (const child of responseFields(field.children)) {
+        const responseKey = child.alias ?? child.name
+        if (Object.hasOwn(value, responseKey)) look(site, value[responseKey], child.name, key, depth + 1, authTest, child)
+      }
+    } else {
+      // JSON scalars have no field selection. Restrict traversal to known
+      // metadata containers; arbitrary nested objects may contain user content.
+      for (const inner of metadataKeys(site, key, parent === undefined)) {
+        if (Object.hasOwn(value, inner)) look(site, value[inner], inner, key, depth + 1, authTest)
+      }
+    }
   }
-  for (const root of ir.roots) {
+  for (const root of responseFields(ir.roots)) {
     const service = root.service ?? root.name.slice(0, Math.max(0, root.name.indexOf('_')))
     // Own keys only: a root named `constructor_x` or `toString_x` must not reach Object's.
     const site = Object.hasOwn(SITE_OF, service) ? SITE_OF[service] : undefined
     if (site === undefined) continue
     const key = root.alias ?? root.name
-    if (Object.hasOwn(data, key)) look(site, data[key], key, undefined, 0)
+    if (Object.hasOwn(data, key)) look(site, data[key], root.name, undefined, 0, /^slack_auth_?test$/i.test(root.name), root)
   }
   return found
 }
 
 /**
  * The bases a response may still teach: empty in the shipped file and named by
- * no option or file of the person's, so nothing is configured and nothing
+ * no file of the person's, so nothing is configured and nothing
  * learned. The cheap gate before a response is parsed for a site.
  */
 export function learnable(sources: Readonly<Record<string, BaseSource>>): (keyof Sites)[] {
@@ -160,7 +194,6 @@ const BASE_TITLE: Readonly<Record<string, string>> = { atlassian: 'Jira and Conf
 const BASE_EXAMPLE: Readonly<Record<string, string>> = { atlassian: 'https://yourco.atlassian.net', slack: 'https://yourco.slack.com', glean: 'https://app.glean.com' }
 
 const SOURCE_WORDS: Readonly<Record<BaseSource, string>> = {
-  option: 'from a plugin option',
   user: 'from your links.toml',
   off: 'turned off by your links.toml, so no response will teach it',
   shipped: 'the shipped default',

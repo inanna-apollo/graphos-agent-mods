@@ -3,6 +3,7 @@
 // from call data; call data only ever fills the encoded query value.
 import { DEFAULT_LINKS_TOML } from './default-links.ts'
 import type { CallIR } from './ir.ts'
+import { tenantOf } from './sites.ts'
 import { tryParseToml } from './toml.ts'
 import type { TomlTable } from './toml.ts'
 
@@ -15,7 +16,7 @@ export type LinkTemplate = {
   field: string
   /** The argument whose (string) value fills `{value}`. */
   arg: string
-  /** A configured base by name, or (extraLinks only) an https URL. */
+  /** A configured base by name. */
   base: string
   /** Must start with `{base}`; `{value}` is replaced by the percent-encoded value. */
   template: string
@@ -30,7 +31,6 @@ export type Link = { label: string; url: string }
 
 export const MAX_URL = 2000
 export const MAX_LINKS = 3
-const MAX_EXTRA = 8
 
 /** An https base with no credentials, query or fragment, trailing slashes removed; else undefined. */
 export function cleanBase(raw: unknown): string | undefined {
@@ -45,23 +45,6 @@ export function cleanBase(raw: unknown): string | undefined {
   } catch {
     return undefined
   }
-}
-
-function isTemplate(x: unknown): x is LinkTemplate {
-  if (typeof x !== 'object' || x === null) return false
-  const t = x as Record<string, unknown>
-  for (const key of ['label', 'service', 'field', 'arg', 'base', 'template']) {
-    if (typeof t[key] !== 'string' || t[key] === '') return false
-  }
-  const label = t.label as string
-  const template = t.template as string
-  return (
-    label.length <= 40 &&
-    template.length <= 500 &&
-    template.startsWith('{base}') &&
-    template.split('{value}').length === 2 &&
-    !template.slice(6).includes('{base}')
-  )
 }
 
 const MAX_RULES = 64
@@ -129,34 +112,30 @@ function readRules(file: string, source: string, problems: string[]): FileRules 
   return out
 }
 
-/** The userConfig option that overrides each named base. */
-export const BASE_OPTIONS: Readonly<Record<string, string>> = { atlassian: 'atlassianBase', glean: 'gleanBase', slack: 'slackBase' }
-
 /**
- * Where a named base's value comes from: a plugin option, the person's links.toml,
+ * Where a named base's value comes from: the person's links.toml,
  * the shipped links.toml, a site learned from an Agent Services response (src/sites.ts), or
  * nowhere (`unset`: empty in the shipped file, so a response may still teach it).
  * `off` is the person's own links.toml setting one to "": turned off, never learned.
  */
-export type BaseSource = 'option' | 'user' | 'off' | 'shipped' | 'learned' | 'unset'
+export type BaseSource = 'user' | 'off' | 'shipped' | 'learned' | 'unset'
 
 export type LinkSources = {
   /** Text of the shipped links.toml; the embedded copy when absent. */
   shipped?: string
   /** Text of the user's override file, if there is one. */
   user?: string
-  /** Sites learned from Agent Services responses (src/sites.ts): each fills only a base no file or option sets. */
+  /** Sites learned from Agent Services responses (src/sites.ts): each fills only a base no file sets. */
   learned?: Readonly<Record<string, string | undefined>>
 }
 
 /**
  * The link configuration: shipped links.toml, then the user's file on top (its
  * [[record]] rules first, its [bases] replacing), then a site learned from a
- * response where neither names one, then the plugin's userConfig bases, then
- * the `extraLinks` JSON. A bad file or entry is skipped and named in
+ * response where neither names one. A bad file or entry is skipped and named in
  * `problems`; nothing throws. `baseSources` says where each named base's value came from.
  */
-export function loadLinkConfig(options: unknown, sources: LinkSources = {}): { config: LinkConfig; problems: string[]; baseSources: Record<string, BaseSource> } {
+export function loadLinkConfig(sources: LinkSources = {}): { config: LinkConfig; problems: string[]; baseSources: Record<string, BaseSource> } {
   const problems: string[] = []
   const shipped = readRules('links.toml', sources.shipped ?? DEFAULT_LINKS_TOML, problems)
   const user = sources.user === undefined ? undefined : readRules('your links.toml', sources.user, problems)
@@ -166,18 +145,10 @@ export function loadLinkConfig(options: unknown, sources: LinkSources = {}): { c
   for (const [name, value] of Object.entries(user?.bases ?? {})) from[name] = value === '' ? 'off' : 'user'
   // Only a base nobody set (empty in the shipped file, absent from the person's own): a site the person turned off stays off.
   for (const [name, site] of Object.entries(sources.learned ?? {})) {
-    const clean = cleanBase(site)
+    const clean = name === 'atlassian' || name === 'slack' ? tenantOf(name, site) : undefined
     if (clean !== undefined && Object.hasOwn(bases, name) && from[name] === 'unset') {
       bases[name] = clean
       from[name] = 'learned'
-    }
-  }
-  const o = typeof options === 'object' && options !== null ? (options as Record<string, unknown>) : {}
-  for (const [name, option] of Object.entries(BASE_OPTIONS)) {
-    const clean = cleanBase(o[option])
-    if (clean !== undefined) {
-      bases[name] = clean
-      from[name] = 'option'
     }
   }
   const known = (rule: { base: string }, kind: string) => {
@@ -187,29 +158,12 @@ export function loadLinkConfig(options: unknown, sources: LinkSources = {}): { c
   }
   const records = [...(user?.records ?? []), ...(shipped?.records ?? [])].filter(rule => known(rule, '[[record]]'))
   const searches = [...(shipped?.searches ?? []), ...(user?.searches ?? [])].filter(rule => known(rule, '[[search]]'))
-  if (typeof o.extraLinks === 'string' && o.extraLinks.trim() !== '') {
-    try {
-      const parsed: unknown = JSON.parse(o.extraLinks)
-      if (Array.isArray(parsed)) {
-        let added = 0
-        for (const entry of parsed) {
-          if (added >= MAX_EXTRA) break
-          if (!isTemplate(entry)) continue
-          if (!Object.hasOwn(bases, entry.base) && cleanBase(entry.base) === undefined) continue
-          searches.push({ label: entry.label, service: entry.service, field: entry.field, arg: entry.arg, base: entry.base, template: entry.template })
-          added++
-        }
-      }
-    } catch {
-      problems.push('extraLinks is not valid JSON')
-    }
-  }
   return { config: { bases, searches, records }, problems, baseSources: from }
 }
 
-/** The configuration from the plugin's `options` and the shipped defaults alone (no override file). Never throws. */
-export function configOf(options: unknown): LinkConfig {
-  return loadLinkConfig(options).config
+/** The configuration from link files and learned sites. */
+export function configOf(sources: LinkSources = {}): LinkConfig {
+  return loadLinkConfig(sources).config
 }
 
 function matches(t: LinkTemplate, rootName: string): boolean {
@@ -227,7 +181,7 @@ export function encode(value: string): string {
 }
 
 function resolveBase(base: string, config: LinkConfig): string | undefined {
-  return cleanBase(Object.hasOwn(config.bases, base) ? config.bases[base] : base)
+  return Object.hasOwn(config.bases, base) ? cleanBase(config.bases[base]) : undefined
 }
 
 function build(t: { base: string; template: string }, value: string, config: LinkConfig): string | undefined {
@@ -246,7 +200,7 @@ function build(t: { base: string; template: string }, value: string, config: Lin
 }
 
 /** Links for a call: built-ins then extras, each over the roots in order; at most 3, de-duplicated. */
-export function linksOf(ir: CallIR, config: LinkConfig = configOf(undefined)): Link[] {
+export function linksOf(ir: CallIR, config: LinkConfig = configOf()): Link[] {
   const out: Link[] = []
   const seen = new Set<string>()
   for (const t of config.searches) {
@@ -276,11 +230,10 @@ export const serviceOf = (rootName: string): string => {
   return cut > 0 ? rootName.slice(0, cut) : ''
 }
 
-/** The origins the person configured: every named base that is set, and extraLinks literal bases. */
+/** The origins the person configured: every named base that is set. */
 export function allowedOrigins(config: LinkConfig): Set<string> {
   const origins = new Set<string>()
-  const bases = [...Object.values(config.bases), ...config.searches.map(t => (Object.hasOwn(config.bases, t.base) ? '' : t.base))]
-  for (const raw of bases) {
+  for (const raw of Object.values(config.bases)) {
     const base = cleanBase(raw)
     if (base !== undefined) origins.add(new URL(base).origin)
   }
@@ -326,12 +279,12 @@ function ruleLink(service: string, item: Record<string, unknown>, config: LinkCo
 }
 
 /** The URL of a Jira issue key on the configured Atlassian site, or undefined. */
-export function jiraKeyUrl(key: string, config: LinkConfig = configOf(undefined)): string | undefined {
+export function jiraKeyUrl(key: string, config: LinkConfig = configOf()): string | undefined {
   return ruleLink('jira', { key }, config)
 }
 
 /** The URL of a Confluence page id on the configured Atlassian site, or undefined. */
-export function confluencePageUrl(id: string | number, config: LinkConfig = configOf(undefined)): string | undefined {
+export function confluencePageUrl(id: string | number, config: LinkConfig = configOf()): string | undefined {
   return ruleLink('confluence', { id: String(id) }, config)
 }
 
@@ -341,7 +294,7 @@ export function confluencePageUrl(id: string | number, config: LinkConfig = conf
  * only if it is canonical https on a configured origin. Response data never
  * picks the host.
  */
-export function recordLinkOf(service: string, item: Record<string, unknown>, config: LinkConfig = configOf(undefined)): string | undefined {
+export function recordLinkOf(service: string, item: Record<string, unknown>, config: LinkConfig = configOf()): string | undefined {
   const own = ruleLink(service, item, config)
   if (own !== undefined) return own
   for (const key of URL_KEYS) {
@@ -367,7 +320,7 @@ const ID_LIKE = /^[A-Za-z][A-Za-z0-9_]*-\d+$/
  * selected `fields`, and an id-like label standing as `key`. The stored `url`
  * is a last resort, accepted only if still on a configured origin.
  */
-export function previewLinkOf(service: string, item: PreviewLinkItem, config: LinkConfig = configOf(undefined)): string | undefined {
+export function previewLinkOf(service: string, item: PreviewLinkItem, config: LinkConfig = configOf()): string | undefined {
   const record: Record<string, unknown> = { ...item.raw }
   for (const field of item.fields ?? []) if (field.value !== undefined && !Object.hasOwn(record, field.name)) record[field.name] = field.value
   if (typeof item.label === 'string' && ID_LIKE.test(item.label) && !Object.hasOwn(record, 'key')) record.key = item.label

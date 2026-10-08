@@ -1,18 +1,11 @@
-// How many rows each block of the pane gets, so the pane never scrolls when
-// it can help it. Pure: no $, no JSX. Modelled on the code-modernization
-// pane's planOf: fixed costs first, then a `shed` ladder that gives rows
-// back in a fixed order until the estimate fits `rows`.
+// Row allocation for the pane. Pure: no $, no JSX.
+// Count fixed content first, then remove optional detail in `shedOrder`
+// until the estimate fits the available rows. Preserve badges, counts,
+// statuses, destructive/denied/will-fail notes and root names. Count omitted
+// detail for the `+N more` labels. Priorities are in docs/pane-design.md.
 //
-// Priorities (docs/pane-design.md): what / where / how much, the notes strip,
-// the inputs, RETURNS, requirements, provenance. The badge, counts, status,
-// the destructive / denied / will-fail notes and each root's name are never
-// shed. Anything cut is counted, so the view can say `+N more`.
-//
-// Row counts follow the surface's wrapping (wrapLines): words wrap at the
-// width the view gives each block (the value column, the note glyph column,
-// RESULT's indents, the pane's blank last column), read from the same tokens
-// the components use. From the same counts the plan says on which rows each
-// hover trigger is drawn (Plan.anchors), so the view pops its card up beside it.
+// Row counts use the same tokens and wrapping widths as the components.
+// Plan.anchors records each hover trigger's rows for card placement.
 
 import { full, renderArg } from '../format/index.ts'
 import type { Segment } from '../format/index.ts'
@@ -192,9 +185,9 @@ export function nameRows(name: string, width: number): string[] {
 }
 
 /**
- * A name broken into rows of at most `width` cells at its seams only (after
- * `_ . - /`, or before a capital): undefined when it fits, or when one of its
- * breaks would have to fall inside a word.
+ * Split a name into rows of at most `width` cells after `_ . - /` or at
+ * camel-case boundaries. Return undefined when the name fits or a required
+ * break would split a word.
  */
 export function seamRows(name: string, width: number): string[] | undefined {
   const rows = nameRows(name, width)
@@ -244,7 +237,8 @@ export function flowLayout(items: readonly FlowItem[], width: number): { places:
     const isName = typeof item !== 'string' && item.name !== undefined
     const room = w - used
     const isBeside = used > 0 && room * 2 >= w
-    // A name that fits the row but not beside the lead-in before it breaks at a seam into the room left, rather than leaving the lead-in alone (`members: acme_customer_data_` / `listOrganizationMembers`).
+    // Split the first name at a word boundary to keep it beside its alias
+    // when the remaining space covers at least half the row.
     const atSeam = isName && !hasName && isBeside && cellWidth(text) <= w && cellWidth(text) > room ? seamRows(text, room) : undefined
     const broken = atSeam ?? (isName && cellWidth(text) > w ? nameRows(text, isBeside ? room : w) : undefined)
     const cells = broken === undefined ? Math.min(cellWidth(text), w) : Math.max(...broken.map(cellWidth))
@@ -592,7 +586,7 @@ export const cardId = {
   op: () => 'n:op',
   /** The status word (`✓ ran`, `1 of 3`). */
   status: () => 'w:status',
-  /** The `summary · Haiku` eyebrow. */
+  /** The `summary · Haiku` credit. */
   credit: () => 'c:credit',
   /** A CHANGES section's label (and its dim notes), by its root's path. */
   section: (path: string) => `x:${path}`,
@@ -729,7 +723,7 @@ export function headerPlan(ir: CallIR, o: { columns: number; status: string; nav
 
 // ---- The plan
 
-/** The credit, an eyebrow: a dim label row directly above the summary box, at its left edge. */
+/** Dim, left-aligned credit row directly above the summary box. */
 export function creditOf(): string {
   return 'summary · Haiku'
 }
@@ -827,7 +821,7 @@ export type PlanOptions = {
   sent?: { operation: string; variables: string; inputError?: string }
 }
 
-/** The shed ladder, in order. The first eight are the design's; the rest are last resorts. */
+/** Detail reduction order. The first eight steps preserve the standard layout. */
 export const SHED_ORDER = [
   // What fills spare room goes first: descriptions, hints, defaults, the paging line, the preview.
   'root-description',
@@ -835,7 +829,7 @@ export const SHED_ORDER = [
   'result-preview',
   'default-args',
   'paging-line',
-  // The eyebrow over the box goes before anything else near the summary; the headline itself never does.
+  // Remove the credit before other summary details. Preserve the headline.
   'summary-credit',
   // The context line closes RESULT: one dim row, the first of what RESULT says to go.
   'result-weight',
@@ -866,7 +860,7 @@ export type ShedKind = (typeof SHED_ORDER)[number]
 /**
  * The ladder for a call: pending, as SHED_ORDER (no rows yet). Settled, the
  * rows that came back are what the pane is for and the form is the record of
- * what was asked: the form is cut to its bones and RESULT never is. What
+ * what was asked: reduce the form to its required content and retain RESULT. What
  * still does not fit scrolls.
  */
 export function shedOrder(isSettled: boolean): readonly ShedKind[] {
@@ -985,9 +979,9 @@ export type Plan = {
   summary: {
     /** Lines the headline takes inside its box: all of them, never cut. */
     lines: number
-    /** The `summary · Haiku` eyebrow row above the box (Haiku wrote the headline, and the row was not shed). */
+    /** Whether the model credit row is shown above the summary box. */
     hasCredit: boolean
-    /** The eyebrow, the box's lines and its two border rows; 0 with nothing to say. */
+    /** Credit, headline and two border rows; 0 when the summary is empty. */
     rows: number
   }
   /** The flags line under the box (src/view/flags.ts): never cut, it wraps. */
@@ -1034,7 +1028,7 @@ type Knobs = {
   annotations: AnnotationLevel
   /** Blank rows between blocks and between roots. */
   gaps: boolean
-  /** The summary's eyebrow row. */
+  /** The summary credit row. */
   credit: boolean
   collapsed: boolean[]
   needs: number[]
@@ -1277,7 +1271,7 @@ export function previewItemRows(item: PreviewRow, rowWidth: number, layout: Prev
 }
 
 /**
- * A rows line whose note would wrap is told shorter rather than orphaned: `more
+ * Shorten a rows line's note when it would wrap: `more
  * available` becomes `more`, then `first page` goes, then the whole note.
  */
 export function fitRowsNote(line: Extract<ResultLine, { kind: 'rows' }>, width: number): ResultLine {
@@ -1501,7 +1495,7 @@ export function planOf(ir: CallIR, opts: PlanOptions): Plan {
   // A root says `not checked` only when other roots were checked: when none was, the notes strip says it once.
   const isAllUnknown = walk(ir.roots).every(field => field.policy === 'unknown')
 
-  // Per root: what never changes with the knobs.
+  // Root facts independent of layout settings.
   const rootFacts = (hasForm ? ir.roots : []).map(root => {
     // A write's arguments its CHANGES block already shows: named on one row, not repeated.
     const changed = changedArgs(preview?.blocks.find(block => block.path === root.path))
@@ -1570,11 +1564,9 @@ export function planOf(ir: CallIR, opts: PlanOptions): Plan {
     bodyRows: BODY_ROWS[0],
   }
 
-  // The ladder tries a notch, undoes it when it gives back no row, and tries
-  // it again once another step has moved something; with many roots that is
-  // thousands of tries. So each part of the plan is worked out once for each
-  // setting of the knobs it reads (a root by its own knobs), and a try plans
-  // only the part its notch changed.
+  // A reduction is reverted if it saves no rows, then retried after later
+  // steps change the layout. Cache each part by its relevant settings so
+  // repeated attempts recompute only the changed parts.
   const memo = <T>(cache: Map<string, T>, key: string, make: () => T): T => {
     const found = cache.get(key)
     if (found !== undefined) return found
@@ -1585,7 +1577,7 @@ export function planOf(ir: CallIR, opts: PlanOptions): Plan {
   const pinsCache = new Map<string, AnnotationIndex>()
   const pinsOf = (level: AnnotationLevel) => memo(pinsCache, level, () => annotationIndex(ir, level, opts.outcome))
 
-  // The headline sits in a box drawn by hand: a border and one cell of padding each side; the credit is an eyebrow row above it.
+  // The headline box has a border and one padding cell on each side, with a credit row above it.
   // A shimmering line wraps after its glyph column, as the still line and the spinner draw it.
   const summaryLines = summaryText === '' ? 0 : isShimmering ? textRows(summaryText, Math.max(1, inner - SUMMARY_FRAME - NOTE_GLYPH)) : wrapRanges(summaryText, Math.max(1, inner - SUMMARY_FRAME)).length
 
@@ -1816,9 +1808,8 @@ export function planOf(ir: CallIR, opts: PlanOptions): Plan {
     const homed = [root, ...drawnLines.flatMap(line => [...(line.head === undefined ? [] : [line.head]), ...line.fields])].filter(field => policyMark(field) !== undefined || pins.field(field.coordinate) !== undefined)
     return { plan, triggers, homed, homeKey: homed.map(field => fieldIndex.get(field)).join(',') }
   }
-  // A try turns one root's knobs, or one knob the roots share. Each root keeps the
-  // knobs it was last planned with and that part, so a root the try left alone
-  // costs a few comparisons; one it changed is looked up by its knobs, or planned.
+  // Each attempt changes a root-specific or shared setting. Reuse each
+  // root's previous plan when its inputs match; otherwise use the keyed cache.
   const rootCaches = rootFacts.map(() => new Map<string, RootPart>())
   const rootSeen: ({ read: readonly unknown[]; caps: readonly number[]; part: RootPart } | undefined)[] = rootFacts.map(() => undefined)
   const rootAt = (r: number, k: Knobs): RootPart => {
@@ -1882,7 +1873,7 @@ export function planOf(ir: CallIR, opts: PlanOptions): Plan {
   const linkRowsOf = (link: Link) => (opts.hasLinkElement === true || opts.hasControls === true ? textRows(`[${linkLabel(link, ir, opts.outcome, links.length > 1)}]`, inner - NOTE_GLYPH) : textRows(`${linkLabel(link, ir, opts.outcome, links.length > 1)} ${link.url}`, inner - NOTE_GLYPH))
   const allLinkRows = links.reduce((sum, link) => sum + linkRowsOf(link), 0)
 
-  // The plan as the knobs stand. Where each hover trigger is drawn is worked out only for the plan returned, not for each try.
+  // Build from the current settings. Compute hover anchors for the final plan.
   const build = (k: Knobs, hasAnchors = true): Plan => {
     const space = k.gaps ? 1 + gap : 0
     const hasCredit = k.credit && ir.summary !== undefined && summaryLines > 0
@@ -1927,7 +1918,7 @@ export function planOf(ir: CallIR, opts: PlanOptions): Plan {
         if ((opts.status ?? '') !== '') anchor(cardId.status(), 0, 1)
       }
       if (policyRow) anchor(cardId.meter(), 1 + (head.opRows?.length ?? 0), 1)
-      // The eyebrow over the summary box, the first row under the header's rule.
+      // Summary credit on the first row below the header separator.
       if (summary.hasCredit) anchor(cardId.credit(), header + 1, 1)
       let top = header + 1 + summary.rows
       // The flags line with its button row, so a card below it leaves the button bare.

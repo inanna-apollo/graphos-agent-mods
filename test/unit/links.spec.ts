@@ -42,7 +42,7 @@ test('JQL link encodes and round-trips', () => {
 test('Glean link, with an overridable base', () => {
   const call = ir('glean_search', { query: 'q & a' })
   assert.equal(linksOf(call, LINKS)[0]?.url, `${GLEAN}/search?q=q%20%26%20a`)
-  const config = configOf({ gleanBase: 'https://other-glean.example.com/' })
+  const config = configOf({ user: '[bases]\nglean = "https://other-glean.example.com/"\n' })
   assert.equal(linksOf(call, config)[0]?.url, 'https://other-glean.example.com/search?q=q%20%26%20a')
 })
 
@@ -52,7 +52,7 @@ test('Slack and Confluence search hits link to their own pages; no Slack search 
   assert.equal(recordLinkOf('slack', { text: 'FYI', permalink }, LINKS), permalink)
   assert.equal(recordLinkOf('confluence', { title: 'Team Weekly', url: '/spaces/V/pages/1234567890/x', content: { id: '1234567890' } }, LINKS), `${SITE}/wiki/pages/viewpage.action?pageId=1234567890`)
   // With no site set (the shipped file names none), neither links.
-  assert.equal(recordLinkOf('slack', { text: 'FYI', permalink }, configOf(undefined)), undefined)
+  assert.equal(recordLinkOf('slack', { text: 'FYI', permalink }, configOf()), undefined)
 })
 
 test('no link without the argument, on another service, or with a non-string value', () => {
@@ -69,34 +69,12 @@ test('no link without the argument, on another service, or with a non-string val
 test('a non-https base is rejected', () => {
   const call = ir('confluence_search', { cql: 'a' })
   for (const bad of ['http://x.atlassian.net', 'javascript:alert(1)', 'ftp://x', 'https://u:p@x.net', 'https://x.net?a=1', 'not a url']) {
-    // configOf ignores the bad option, so the bad host never appears
-    for (const link of linksOf(call, configOf({ atlassianBase: bad }))) assert.ok(!link.url.includes(bad), bad)
+    for (const link of linksOf(call, configOf({ user: `[bases]\natlassian = ${JSON.stringify(bad)}\n` }))) assert.ok(!link.url.includes(bad), bad)
     // and a hand-built config with the bad base yields nothing
-    const config = configOf(undefined)
+    const config = configOf()
     config.bases.atlassian = bad
     assert.deepEqual(linksOf(call, config), [], bad)
   }
-})
-
-test('extraLinks adds a link; bad entries and bad JSON are ignored', () => {
-  const extra = JSON.stringify([
-    { label: 'Open in X', service: 'x', field: 'x_search*', arg: 'query', base: 'https://x.example', template: '{base}/s?q={value}' },
-    { label: 'Open in Wiki', service: 'confluence', field: 'confluence_*', arg: 'cql', base: 'atlassian', template: '{base}/alt?c={value}' },
-    { label: 'no base', service: 'x', field: 'x_*', arg: 'query', base: 'http://x.example', template: '{base}/s?q={value}' },
-    { label: 'host from template', service: 'x', field: 'x_*', arg: 'query', base: 'atlassian', template: 'https://evil.example/{value}' },
-    { label: 'two values', service: 'x', field: 'x_*', arg: 'query', base: 'atlassian', template: '{base}/{value}/{value}' },
-    { label: 'proto', service: 'x', field: 'x_*', arg: 'query', base: 'toString', template: '{base}/{value}' },
-    'junk',
-    null,
-  ])
-  const config = configOf({ atlassianBase: SITE, extraLinks: extra })
-  const shipped = configOf(undefined).searches.length
-  assert.equal(config.searches.length, shipped + 2)
-  assert.deepEqual(linksOf(ir('x_search', { query: 'a b' }), config), [{ label: 'Open in X', url: 'https://x.example/s?q=a%20b' }])
-  assert.deepEqual(linksOf(ir('confluence_search', { cql: 'a' }), config).map(l => l.label), ['Open in Confluence', 'Open in Wiki'])
-  assert.equal(configOf({ extraLinks: '{not json' }).searches.length, shipped)
-  assert.equal(configOf({ extraLinks: '{"a":1}' }).searches.length, shipped)
-  assert.deepEqual(configOf(42).bases, configOf({}).bases)
 })
 
 test('a call-controlled host never appears outside the encoded query', () => {
@@ -136,7 +114,7 @@ test('at most 3 links, in stable order, de-duplicated', () => {
     state: 'ready',
     roots: [root('slack_searchA', 'query'), root('glean_search', 'query'), root('jira_s', 'jql'), root('confluence_s', 'cql'), root('confluence_t', 'cql')],
   }
-  const config = configOf({ atlassianBase: SITE, slackBase: 'https://team.slack.com' })
+  const config = configOf({ user: `[bases]\natlassian = "${SITE}"\nslack = "https://team.slack.com"\n` })
   const links = linksOf(many, config)
   assert.equal(links.length, MAX_LINKS)
   assert.deepEqual(links.map(l => l.label), ['Open in Confluence', 'Open in Jira', 'Open in Glean'])
@@ -148,7 +126,7 @@ test('at most 3 links, in stable order, de-duplicated', () => {
 
 // ---- Response URL keys, and text a link is built from
 
-const OWN = loadLinkConfig(undefined, {
+const OWN = loadLinkConfig({
   shipped: ['[bases]', 'wiki = "https://wiki.example.com"', 'code = "https://code.example.com"', '', '[[search]]', 'label = "Open in Wiki"', 'service = "x"', 'root = "x_*"', 'arg = "query"', 'url = "{wiki}/s?q={value}"'].join('\n'),
 }).config
 

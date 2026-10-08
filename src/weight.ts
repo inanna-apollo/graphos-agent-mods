@@ -12,14 +12,9 @@
 // key and its value. A parent's bytes include its children's, so the paths
 // form a tree.
 //
-// Which fields to name (`explain`, below): the ones a person would drop or
-// narrow, so not just the root. A field is named when it holds at least a
-// tenth of the response (MIN_SHARE). Starting from each such member of the
-// response, the walk goes down into the fields that hold a tenth of the
-// response while they together hold most of their parent (MOST); where they do
-// not (the weight is spread over many small fields, or the parent is a leaf)
-// the parent is the answer: narrowing it is the only lever. At most MAX_HEAVY
-// are kept, heaviest first, so the record stays small.
+// Select fields accounting for at least MIN_SHARE of the response. Descend
+// into a parent's qualifying children when their combined share reaches MOST;
+// otherwise retain the parent. Keep at most MAX_HEAVY entries, heaviest first.
 //
 // Bounds, since the result is kept in $.state and a response can be 2 MB:
 // MAX_PATHS distinct paths are tracked (a map-like object keyed by ids would
@@ -43,7 +38,7 @@ export const MAX_DEPTH = 10
 /** The longest key kept in a path, in characters; a path is generous at four of them. */
 export const MAX_SEGMENT = 120
 const MAX_PATH = 4 * MAX_SEGMENT
-/** A token is about this many characters; in JSON, which is mostly ASCII, about this many bytes. */
+/** Rough JSON token estimate, not a measurement from the model's tokenizer. */
 export const BYTES_PER_TOKEN = 4
 
 // ---- Measuring
@@ -301,7 +296,7 @@ export function sizeText(bytes: number): string {
   return mb < 10 ? `${trimmed(mb.toFixed(1))} MB` : `${Math.round(mb)} MB`
 }
 
-/** A count in the fewest digits that stay honest: `85`, `850`, `1.4k`, `14k`, `1.2M`. */
+/** A compact rounded count: `85`, `850`, `1.4k`, `14k`, `1.2M`. */
 function compactCount(count: number): string {
   if (count < 100) return String(count)
   if (count < 1000) {
@@ -320,10 +315,10 @@ function compactCount(count: number): string {
   return m < 10 ? `${trimmed(m.toFixed(1))}M` : `${Math.round(m)}M`
 }
 
-/** The tokens bytes of JSON come to, an estimate at about 4 characters a token. */
+/** Approximate tokens from compact JSON bytes; content and tokenizer affect the actual count. */
 export const tokensOf = (bytes: number): number => Math.round(Math.max(0, bytes) / BYTES_PER_TOKEN)
 
-/** `about 14k tokens`: always an approximation, and said as one. */
+/** Format the estimate with an explicit qualifier: `about 14k tokens`. */
 export function tokensText(bytes: number): string {
   const tokens = tokensOf(bytes)
   return `about ${compactCount(tokens)} token${tokens === 1 ? '' : 's'}`

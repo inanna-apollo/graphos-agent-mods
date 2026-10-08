@@ -1,41 +1,26 @@
-// The pane's tokens: colors, glyphs and the few fixed sizes. Components read
-// these; nothing else in the view names a color or a glyph.
-//
-// Colors are theme keys, not ANSI names, so they follow the person's theme
-// (code-modernization palette.ts: "yellow or cyan text is hard to read on
-// white"). Glyphs in fixed-width or right-aligned slots are East Asian
-// narrow (✓ ✕ ▸ ▾ ◂ ▴ ↯ ◌ ◉ ◦ ▰ ▱); ambiguous ones (◐ ◆ ⚑ · … ─) appear
-// only in flowing text, rules, or the note column (NOTE_GLYPH), which the
-// terminals the engine targets draw one cell wide. The tree guides (├ ╰ │), the block bar (┃) and the box are box drawing, which the
-// terminals the engine targets draw one cell wide.
+// Shared colors, glyphs and fixed sizes for pane components.
+// Colors use engine theme keys. Fixed-width slots use narrow glyphs
+// (✓ ✕ ▸ ▾ ◂ ▴ ↯ ◌ ◉ ◦ ▰ ▱). Ambiguous-width glyphs (◐ ◆ ⚑ · … ─)
+// are used in flowing text, rules or the note column; the supported terminals
+// render them and the box-drawing guides as one cell.
 
 /**
- * Claude's own orange. It sits close to the error red, so the pane spends it
- * in two spots only: the shown history dot and the `/gas` command in the
- * empty state. Nothing that is a name, a value or a section uses it.
+ * Claude's orange, used for the history dot and the empty state's `/gas` command.
  */
 export const ACCENT = 'claude'
 
 /**
- * Color as emphasis, in three layers (docs/pane-design.md):
- *
- * 1. Default text carries the content: field names, argument names, scopes,
- *    root names (bold). What the call sets (argument values) is bold.
- * 2. Structure gets ONE hue (BLOCK_HUE, violet) on the few marks that open a
- *    block or frame one: the `┃` bars, the summary box, the card outline.
- *    Violet, not blue: blue means a press opens it (COLOR.link), so nothing
- *    structural takes a blue. Everything else structural is gray: the form's
- *    sub-labels (`return type`, `access`), query keywords, types and tags in
- *    `inactive`; guides, braces and rules in `subtle`, the faintest.
- * 3. Loud color means something: policy (COLOR: mask amber, deny red),
- *    writes and destructive names (red), and RESULT's numbers (teal, bold).
+ * Palette roles (docs/pane-design.md): default text for names and values;
+ * BLOCK_HUE for section bars, summary borders and card outlines; `inactive`
+ * for labels and syntax; `subtle` for guides and separators. Policy, writes,
+ * links and result counts have separate semantic colors.
  */
 export const BLOCK_HUE = 'autoAccept'
-/** Words that label without being content: subordinate section labels, keywords, types, tags. */
+/** Subdued labels, keywords, types and tags. */
 export const QUIET = 'inactive'
 /** The faintest gray: tree guides, braces, rule fills. */
 export const FAINT = 'subtle'
-/** The theme's own text color: a label that is content (an argument name) at full strength, not dim. */
+/** Default theme text color for names and values. */
 export const TEXT = 'text'
 /** An opaque raised panel behind a hover card, so the rows under it do not show through. */
 export const PANEL = 'userMessageBackground'
@@ -62,7 +47,7 @@ export const STRUCT = {
   operator: QUIET,
   /** A record's date or other extra. */
   date: QUIET,
-  /** The personal-data ◆, in the tree and the notes: a fact worth seeing, not a policy; gray, so policy keeps the color. */
+  /** Gray personal-data marker, distinct from policy colors. */
   personal: QUIET,
   /** The ↯ of a limit note. */
   limit: QUIET,
@@ -126,7 +111,7 @@ export const GLYPH = {
   personal: '◆',
   limit: '↯',
   bullet: '·',
-  /** A root that writes (a mutation, a destructive name): a quiet marker before its name, in `warning`. */
+  /** Warning marker before a mutation or destructive root name. */
   attention: '▴',
   /** An action that leaves the pane: a link to open. */
   link: '↗',

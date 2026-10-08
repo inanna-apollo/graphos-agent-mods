@@ -142,7 +142,9 @@ test('non-denial errors that share a code and a normalized path group too; other
 
 test('a long field name is never cut: the line wraps', () => {
   const outcome = { rows: [], authLinks: [], errors: [{ message: 'x', code: 'C', path: 'a.*.' + 'z'.repeat(60), count: 2, of: 3 }] }
-  const text = resultLines(outcome as never)[0]?.text ?? ''
+  const line = resultLines(outcome)[0]
+  assert.ok(line?.kind === 'error')
+  const text = line.text
   assert.ok(text.includes(`at ${'z'.repeat(60)} in 2 of 3 items`), text)
   assert.ok(!text.includes('…'))
 })

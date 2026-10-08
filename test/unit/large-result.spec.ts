@@ -1,3 +1,4 @@
+import { URL } from 'node:url'
 // Oversized results (Claude Code swaps them for an error text naming a saved file) and rows past the call's limit.
 import { flagsOf, flagsText } from '../../src/view/flags.ts'
 import assert from 'node:assert/strict'

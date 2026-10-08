@@ -1,3 +1,4 @@
+import { URL } from 'node:url'
 // The plugin's name is spelled in several places that must agree: the manifest,
 // the `$.state` contract, every atom, and the folder of the person's own files.
 // A rename that misses one is caught here, not by a person's lost state.

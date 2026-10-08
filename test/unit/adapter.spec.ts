@@ -86,7 +86,7 @@ test('missing operation is rejected', () => {
   if (!result.ok) assert.equal(result.variables, '')
 })
 
-test('operation text is preserved exactly, including hostile characters', () => {
+test('operation text is preserved exactly, including control characters', () => {
   const operation = 'query { a }\x1b[31m\u202e'
   const result = adaptExecute({ operation, variables: '' })
   assert.equal(result.ok && result.input.operation, operation)

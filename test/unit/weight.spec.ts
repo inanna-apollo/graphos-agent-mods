@@ -308,7 +308,7 @@ test('a size reads as a person writes it: bytes, then KB with one decimal under 
   for (const [bytes, text] of cases) assert.equal(sizeText(bytes), text, String(bytes))
 })
 
-test('tokens are always about: at four bytes each, in the fewest digits that stay honest', () => {
+test('token estimates use four bytes per token and compact rounded counts', () => {
   const cases: [number, string][] = [[0, 'about 0 tokens'], [4, 'about 1 token'], [400, 'about 100 tokens'], [3400, 'about 850 tokens'], [4000, 'about 1k tokens'], [5600, 'about 1.4k tokens'], [59_597, 'about 15k tokens'], [3_996, 'about 1k tokens'], [39_996, 'about 10k tokens'], [3_999_996, 'about 1M tokens'], [6_000_000, 'about 1.5M tokens']]
   for (const [bytes, text] of cases) assert.equal(tokensText(bytes), text, String(bytes))
   assert.equal(tokensOf(58 * 1024), 14_848)

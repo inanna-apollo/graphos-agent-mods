@@ -2,6 +2,7 @@
 // the `$.state` contract, every atom, and the folder of the person's own files.
 // A rename that misses one is caught here, not by a person's lost state.
 
+import { URL } from 'node:url'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'

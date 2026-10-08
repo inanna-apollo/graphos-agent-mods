@@ -121,16 +121,12 @@ test('no Agent Services connector says how to connect the claude.ai one, and dra
   expect(seen.fills).toEqual([])
 })
 
-test('a read-only tool that is not allowed gets its exact allow line; the allowed ones and the write tool do not', async ($, on) => {
+test('read-only tools that are not allowed leave setup ready, never offering the write tool', async ($, on) => {
   world(on, { check: tool => (tool === 'introspect' || tool === 'dry_run' ? 'ask' : 'allow'), userLinks: BOTH_SITES })
   await start($)
   const report = await setup($)
-  expect(report).toContain(`mcp__${SERVER}__introspect`)
-  expect(report).toContain(`mcp__${SERVER}__dry_run`)
-  expect(report).not.toContain(`mcp__${SERVER}__search`)
-  expect(report).not.toContain(`mcp__${SERVER}__validate`)
-  expect(report).not.toContain(`mcp__${SERVER}__execute`)
-  expect(report).toContain('/permissions')
+  expect(report).toMatch(READY)
+  expect(report).not.toContain('execute')
 })
 
 test('an unset site is drafted into the prompt box as a read-only question, after what is typed, and nothing is sent; only search is called', async ($, on) => {
@@ -160,7 +156,7 @@ test('where search is not allowed, no question is drafted and nothing is called'
   const report = await setup($)
   expect(seen.fills).toEqual([])
   expect(seen.gasCalls).toEqual([])
-  expect(report).toContain(`mcp__${SERVER}__search`)
+  expect(report).toMatch(READY)
 })
 
 test('only the site that is unset is asked about', async ($, on) => {

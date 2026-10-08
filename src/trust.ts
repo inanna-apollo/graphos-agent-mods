@@ -8,20 +8,19 @@
 // the rule names set to a value the rule allows. A field written in a rule
 // with no selection of its own allows anything below it.
 //
-// Decided from the call's own text and variables alone, never from the
-// model's summary. A mutation, a subscription, a root named for a change, a
-// directive, or anything this module cannot parse never fits, whatever the
-// rules say. A string in a rule is a pattern over the text (`*` matches any
-// run), not over what the text means: `project = DEV*` also matches
-// `project = DEV OR project = OPS`.
+// Match the operation text and variables. Mutations, subscriptions, roots
+// named for a change, unsupported or unresolved directives and ambiguous
+// syntax require approval. Resolved @skip/@include conditions are supported.
+// Strings use literal glob matching (`*` matches any run of characters), so
+// `project = DEV*` also matches `project = DEV OR project = OPS`.
 
 import { adaptExecute } from './adapter.ts'
 import { isRecord, LIMIT_ARGS } from './guards.ts'
-import { MAX_TOKENS, normalize } from './normalize.ts'
+import { MAX_TOKENS, MAX_VISITS, normalize } from './normalize.ts'
 import type { ArgValue, NormalizedField } from './normalize.ts'
 import { isDestructiveName, isWriteName } from './risk.ts'
 import { Kind, parse, print, visit } from './vendor/graphql.js'
-import type { DocumentNode, FragmentDefinitionNode } from './vendor/graphql.js'
+import type { DocumentNode, FragmentDefinitionNode, SelectionNode } from './vendor/graphql.js'
 import type { RootFit, TrustFit } from '../types'
 
 type DefinitionNode = DocumentNode['definitions'][number]
@@ -85,6 +84,11 @@ export function parseTrust(text: string): TrustRules {
       problems.push(`skipped ${name}: rules take no directives (@${directives[0]})`)
       continue
     }
+    const problem = eligibilityProblem({ kind: Kind.DOCUMENT, definitions: [def, ...fragments] }, {})
+    if (problem !== undefined) {
+      problems.push(`skipped ${name}: ${problem}`)
+      continue
+    }
     if (rules.length >= MAX_RULES) {
       problems.push(`skipped ${name} and every rule after it: at most ${MAX_RULES} rules`)
       break
@@ -111,9 +115,10 @@ export function fitCall(input: unknown, rules: readonly TrustRule[]): Fit {
   const normalized = normalize(adapted.input.operation, adapted.input.variables)
   if (!normalized.ok) return miss(`the operation cannot be read: ${normalized.message}`)
   if (normalized.opType !== 'query') return miss(`a ${normalized.opType} always asks`)
-  // Directives the expansion keeps no trace of (on the operation, a fragment, a spread) are found in the text itself.
-  const directives = directivesIn(parse(adapted.input.operation, { noLocation: true, maxTokens: MAX_TOKENS }).definitions).filter(name => name !== 'skip' && name !== 'include')
-  if (directives.length > 0) return miss(`the operation uses @${directives[0]}, which rules do not cover`)
+  // Matching is stricter than visualization: inspect even dropped selections and
+  // unrestricted subtrees before normalization can erase ambiguous syntax.
+  const problem = eligibilityProblem(parse(adapted.input.operation, { noLocation: true, maxTokens: MAX_TOKENS }), normalized.variables)
+  if (problem !== undefined) return miss(problem)
   if (normalized.roots.length === 0) return miss('the operation selects nothing')
 
   const fits: RootFit[] = []
@@ -274,6 +279,72 @@ function directivesIn(defs: readonly DefinitionNode[]): string[] {
   const names: string[] = []
   for (const def of defs) visit(def, { Directive: node => { names.push(node.name.value) } })
   return names
+}
+
+/** Syntax whose meaning the matcher cannot safely infer without a schema. */
+function eligibilityProblem(doc: DocumentNode, variables: Record<string, unknown>): string | undefined {
+  let problem: string | undefined
+  const duplicate = (names: readonly string[], what: string) => {
+    const seen = new Set<string>()
+    for (const name of names) {
+      if (seen.has(name)) problem ??= `the operation repeats ${what} ${quote(name)}`
+      seen.add(name)
+    }
+  }
+  visit(doc, {
+    enter(node) {
+      if ('arguments' in node) duplicate((node.arguments ?? []).map(arg => arg.name.value), 'argument')
+      if ('directives' in node) {
+        duplicate((node.directives ?? []).map(directive => directive.name.value), 'directive')
+        for (const directive of node.directives ?? []) {
+          const name = directive.name.value
+          if (name !== 'skip' && name !== 'include') {
+            problem ??= `the operation uses @${name}, which rules do not cover`
+            continue
+          }
+          const validLocation = node.kind === Kind.FIELD || node.kind === Kind.FRAGMENT_SPREAD || node.kind === Kind.INLINE_FRAGMENT
+          const args = directive.arguments ?? []
+          const value = args.length === 1 && args[0]?.name.value === 'if' ? args[0].value : undefined
+          const condition = value?.kind === Kind.BOOLEAN ? value.value
+            : value?.kind === Kind.VARIABLE && Object.hasOwn(variables, value.name.value) ? variables[value.name.value] : undefined
+          if (!validLocation || typeof condition !== 'boolean') problem ??= `the operation uses an unresolved or invalid @${name}, which rules do not cover`
+        }
+      }
+      if (node.kind === Kind.OBJECT) duplicate(node.fields.map(field => field.name.value), 'input field')
+      if (node.kind === Kind.OPERATION_DEFINITION) duplicate((node.variableDefinitions ?? []).map(def => def.variable.name.value), 'variable')
+    },
+  })
+  return problem ?? nestedTypeProblem(doc)
+}
+
+/** Normalization keeps one type condition per field, so it cannot preserve intersections. */
+function nestedTypeProblem(doc: DocumentNode): string | undefined {
+  const fragments = new Map(doc.definitions.filter((def): def is FragmentDefinitionNode => def.kind === Kind.FRAGMENT_DEFINITION).map(def => [def.name.value, def]))
+  const pending: { selection: SelectionNode; onType?: string }[] = doc.definitions.flatMap(def => def.kind === Kind.OPERATION_DEFINITION ? def.selectionSet.selections.map(selection => ({ selection })) : [])
+  const expanded = new Set<string>()
+  let visits = 0
+  while (pending.length > 0) {
+    if (++visits > MAX_VISITS) return 'the operation has too many selections to check its type conditions for trust rules'
+    const { selection, onType } = pending.pop()!
+    if (selection.kind === Kind.FIELD) {
+      // A child's type condition applies to a new value, not its parent value.
+      for (const child of selection.selectionSet?.selections ?? []) pending.push({ selection: child })
+      continue
+    }
+    const fragment = selection.kind === Kind.FRAGMENT_SPREAD ? fragments.get(selection.name.value) : undefined
+    const nextType = selection.kind === Kind.INLINE_FRAGMENT ? selection.typeCondition?.name.value ?? onType : fragment?.typeCondition.name.value
+    if (onType !== undefined && nextType !== undefined && onType !== nextType) {
+      return `the operation nests different type conditions (${quote(onType)} and ${quote(nextType)}), which rules do not cover`
+    }
+    if (selection.kind === Kind.FRAGMENT_SPREAD) {
+      const key = `${selection.name.value}\u0000${nextType ?? ''}`
+      if (expanded.has(key)) continue
+      expanded.add(key)
+    }
+    const selections = selection.kind === Kind.INLINE_FRAGMENT ? selection.selectionSet.selections : fragment?.selectionSet.selections ?? []
+    for (const child of selections) pending.push({ selection: child, ...(nextType !== undefined && { onType: nextType }) })
+  }
+  return undefined
 }
 
 const quote = (text: string): string => JSON.stringify(text.length > QUOTE_CHARS ? `${text.slice(0, QUOTE_CHARS)}…` : text)

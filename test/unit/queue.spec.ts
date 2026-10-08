@@ -123,6 +123,16 @@ test('statusOf: only a true isError counts as an error', () => {
   assert.equal(statusOf({ isError: 1 }), 'ran')
 })
 
+test('a saved-output stand-in ran despite an engine error flag; denials and invalid paths still fail', () => {
+  const stand = (path: string) => `<persisted-output>\nOutput too large (58.2KB). Full output saved to: ${path}\nPreview (first 2KB):\n...\n</persisted-output>`
+  const text = stand('/home/me/.claude/projects/p/s/tool-results/big.json')
+  assert.equal(statusOf({ isError: true, text }), 'ran')
+  assert.equal(statusOf({ isError: true, text, result: [{ type: 'text', text: '{"data":{}}' }] }), 'ran')
+  assert.equal(statusOf({ isError: true, result: [{ type: 'text', text }] }), 'ran')
+  assert.equal(statusOf({ isError: true, text, deny: 'refused' }), 'denied')
+  assert.equal(statusOf({ isError: true, text: stand('/tmp/fake.json') }), 'errored')
+})
+
 test('a refusal at the permission dialog reads as denied, not failed', () => {
   const refused = "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file)."
   assert.equal(statusOf({ isError: true, result: refused }), 'denied')

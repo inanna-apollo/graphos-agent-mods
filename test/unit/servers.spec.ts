@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { gasServers, splitMcpTool } from '../../src/servers.ts'
+import { CONNECTOR, gasServers, splitMcpTool } from '../../src/servers.ts'
 
 const mcp = (name: string) => ({ name, mcp: true })
 const full = (server: string) => ['execute', 'validate', 'introspect', 'dry_run'].map(tool => mcp(`mcp__${server}__${tool}`))
@@ -29,33 +29,33 @@ test('degenerate mcp names do not split', () => {
 })
 
 test('gasServers finds a server with the full set', () => {
-  assert.deepEqual([...gasServers(full('gas'))], ['gas'])
+  assert.deepEqual([...gasServers(full(CONNECTOR))], [CONNECTOR])
 })
 
 test('gasServers ignores extra tools and non-mcp tools', () => {
-  const tools = [...full('gas'), mcp('mcp__gas__search'), { name: 'Bash', mcp: false }]
-  assert.deepEqual([...gasServers(tools)], ['gas'])
+  const tools = [...full(CONNECTOR), mcp(`mcp__${CONNECTOR}__search`), { name: 'Bash', mcp: false }]
+  assert.deepEqual([...gasServers(tools)], [CONNECTOR])
 })
 
 test('gasServers rejects a partial set', () => {
-  const tools = full('gas').filter(tool => !tool.name.endsWith('__dry_run'))
+  const tools = full(CONNECTOR).filter(tool => !tool.name.endsWith('__dry_run'))
   assert.equal(gasServers(tools).size, 0)
 })
 
 test('gasServers ignores tools with mcp: false', () => {
-  const tools = full('gas').map(tool => ({ ...tool, mcp: false }))
+  const tools = full(CONNECTOR).map(tool => ({ ...tool, mcp: false }))
   assert.equal(gasServers(tools).size, 0)
-  const oneBuiltin = full('gas').map((tool, i) => (i === 0 ? { ...tool, mcp: false } : tool))
+  const oneBuiltin = full(CONNECTOR).map((tool, i) => (i === 0 ? { ...tool, mcp: false } : tool))
   assert.equal(gasServers(oneBuiltin).size, 0)
 })
 
-test('gasServers handles two servers independently', () => {
-  const partial = full('other').slice(0, 3)
-  assert.deepEqual([...gasServers([...full('a'), ...partial, ...full('b__c')])].sort(), ['a', 'b__c'])
+test('only the claude.ai connector is Agent Services: another server with the same tools is not', () => {
+  assert.deepEqual([...gasServers([...full('github'), ...full(CONNECTOR), ...full('my_gas')])], [CONNECTOR])
+  assert.equal(gasServers([...full('github'), ...full(`${CONNECTOR}_2`), ...full(`x${CONNECTOR}`)]).size, 0)
 })
 
 test('tools of different servers are not pooled', () => {
-  const tools = [mcp('mcp__a__execute'), mcp('mcp__a__validate'), mcp('mcp__b__introspect'), mcp('mcp__b__dry_run')]
+  const tools = [mcp(`mcp__${CONNECTOR}__execute`), mcp(`mcp__${CONNECTOR}__validate`), mcp('mcp__b__introspect'), mcp('mcp__b__dry_run')]
   assert.equal(gasServers(tools).size, 0)
 })
 

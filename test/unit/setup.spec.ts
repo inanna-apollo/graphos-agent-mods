@@ -11,8 +11,8 @@ const SERVER = 'claude_ai_GraphOS_Agent_Services'
 const TOOLS = ['search', 'introspect', 'validate', 'dry_run']
 const tools = (state: ToolState | Partial<Record<string, ToolState>>, server = SERVER) => TOOLS.map(tool => ({ server, tool, state: typeof state === 'string' ? state : (state[tool] ?? 'ask') }))
 
-const BARE = loadLinkConfig(undefined)
-const SET = loadLinkConfig({ atlassianBase: 'https://yourco.atlassian.net', slackBase: 'https://yourco.slack.com' })
+const BARE = loadLinkConfig()
+const SET = loadLinkConfig({ user: '[bases]\natlassian = "https://yourco.atlassian.net"\nslack = "https://yourco.slack.com"\n' })
 
 /** A session where everything is done: current Claude Code, a connector, its tools allowed, both sites set. */
 const DONE: SetupFacts = {
@@ -51,40 +51,24 @@ test('no connector is the one step, says how to connect the claude.ai one, and c
   assert.equal(steps(report).length, 1)
   assert.match(report, /"GraphOS Agent Services" connector at claude\.ai/)
   assert.match(report, /\/mcp/)
-  assert.match(report, /not the open-source Apollo MCP Server/)
+  assert.match(report, /requires GraphOS Agent Services/)
+  assert.match(report, /Apollo MCP Server.*does not provide/)
   assert.doesNotMatch(report, /mcp__/)
   // A listing that failed is not the same as no connector.
   assert.match(steps(setupReport({ ...DONE, servers: undefined, tools: [] }))[0] ?? '', /could not list its tools.*\/mcp/)
 })
 
-test('the tools not yet allowed are one step with their exact lines, and how to add them; allowed ones get none', () => {
-  const report = setupReport({ ...DONE, tools: tools({ search: 'allow', introspect: 'ask', validate: 'allow', dry_run: 'ask' }) })
-  assert.equal(steps(report).length, 1)
-  const lines = report.split('\n').map(line => line.trim())
-  assert.ok(lines.includes(`mcp__${SERVER}__introspect`))
-  assert.ok(lines.includes(`mcp__${SERVER}__dry_run`))
-  assert.ok(!lines.includes(`mcp__${SERVER}__search`))
-  assert.ok(!lines.includes(`mcp__${SERVER}__validate`))
-  assert.match(report, /\/permissions.*Allow tab.*Add a new rule/)
-  assert.match(report, /changes data/)
-  assert.match(report, /Then run \/gas setup again/)
-  assert.match(report, /^GraphOS Inspector setup: one step left\./)
-})
-
-test('a denied tool is a step to remove the deny rule, with no allow line; a capped one is a note, not a step', () => {
-  const report = setupReport({ ...DONE, tools: tools({ search: 'deny', introspect: 'capped', validate: 'allow', dry_run: 'allow' }) })
-  const lines = report.split('\n').map(line => line.trim())
-  assert.ok(!lines.includes(`mcp__${SERVER}__search`))
-  assert.equal(steps(report).length, 1)
-  assert.match(steps(report)[0] ?? '', /Remove the deny rule for search/)
-  assert.match(report, /organization's policy limits introspect/)
-})
-
-test('two Agent Services servers are each named, and a server name is escaped', () => {
-  const report = setupReport({ ...DONE, servers: [SERVER, 'second\x1b[31m'], tools: [...tools('allow'), ...tools('ask', 'second\x1b[31m')] })
-  assert.equal(steps(report).length, 1)
-  assert.match(report, /on second/)
-  assert.doesNotMatch(report, /\x1b/)
+test('the read-only tools are never a step: not allowed, denied or capped, the report is ready and says so in a note', () => {
+  for (const state of [tools('ask'), tools({ search: 'deny', introspect: 'capped', validate: 'allow', dry_run: 'ask' })]) {
+    const report = setupReport({ ...DONE, tools: state })
+    assert.deepEqual(steps(report), [])
+    assert.equal(report.split('\n')[0], READY)
+    // No tool ids: the note names the tools.
+    assert.doesNotMatch(report, /mcp__/)
+  }
+  assert.match(setupReport({ ...DONE, tools: tools('ask') }), /Optional: allow.*\/permissions/)
+  // A server name is escaped where two servers are told apart.
+  assert.doesNotMatch(setupReport({ ...DONE, servers: [SERVER, 'second\x1b[31m'], tools: [...tools('allow'), ...tools('ask', 'second\x1b[31m')] }), /\x1b/)
 })
 
 test('a site is a step only when its question was drafted (or could not be); otherwise it is learned and not mentioned', () => {
@@ -92,7 +76,7 @@ test('a site is a step only when its question was drafted (or could not be); oth
   const drafted = setupReport({ ...unset, draft: { isDrafted: true } })
   assert.equal(steps(drafted).length, 1)
   assert.match(steps(drafted)[0] ?? '', /Send the read-only question in your prompt box.*Jira, Confluence and Slack/)
-  assert.match(drafted, /not from what Claude says/)
+  assert.match(drafted, /Agent Services' response supplies the site URL/)
   assert.match(steps(setupReport({ ...unset, draft: { isDrafted: false, why: 'close the open dialog first, then try again' } }))[0] ?? '', /Run \/gas setup again.*close the open dialog/)
   // Slack only, Slack's question only.
   const slack = setupReport({ ...unset, graph: sitesOfGraph(['slack']), draft: { isDrafted: true } })
@@ -102,7 +86,7 @@ test('a site is a step only when its question was drafted (or could not be); oth
   assert.equal(setupReport({ ...DONE, bases: BARE.config.bases, sources: BARE.baseSources }), READY + '\nTrust rules: 2 loaded; /gas trust lists them.')
   assert.deepEqual(steps(setupReport({ ...unset, graph: sitesOfGraph(['salesforce']) })), [])
   // Learned and turned-off sites are nothing to do.
-  const learned = loadLinkConfig(undefined, { learned: { atlassian: 'https://yourco.atlassian.net' }, user: '[bases]\nslack = ""\n' })
+  const learned = loadLinkConfig({ learned: { atlassian: 'https://yourco.atlassian.net' }, user: '[bases]\nslack = ""\n' })
   assert.deepEqual(steps(setupReport({ ...DONE, bases: learned.config.bases, sources: learned.baseSources, graph: unset.graph, draft: { isDrafted: true } })), [])
   // A scope named like a prototype member is not a service.
   assert.deepEqual(sitesOfGraph(['constructor', 'toString', '__proto__']), { shown: [], askable: [] })

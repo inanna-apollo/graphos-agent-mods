@@ -21,7 +21,7 @@ test('a Jira item with a key links to /browse/KEY; a non-key does not', () => {
   assert.equal(recordLinkOf('jira', { key: 'ams-1' }, LINKS), undefined)
   assert.equal(recordLinkOf('jira', { key: 'DEV-1/../x' }, LINKS), undefined)
   assert.equal(recordLinkOf('slack', { key: 'DEV-1' }, LINKS), undefined)
-  assert.equal(recordLinkOf('jira', { key: 'DEV-1' }, configOf({ atlassianBase: 'https://example.atlassian.net' })), 'https://example.atlassian.net/browse/DEV-1')
+  assert.equal(recordLinkOf('jira', { key: 'DEV-1' }, configOf({ user: '[bases]\natlassian = "https://example.atlassian.net"\n' })), 'https://example.atlassian.net/browse/DEV-1')
 })
 
 test('a Confluence item with a numeric id links to the page', () => {
@@ -37,7 +37,7 @@ test('a response URL is accepted only on a configured origin', () => {
   assert.equal(recordLinkOf('glean', { webUrl: `${SITE}/wiki/spaces/X/pages/1` }, LINKS), `${SITE}/wiki/spaces/X/pages/1`)
   assert.equal(recordLinkOf('glean', { url: 'https://evil.example.com/doc/1' }, LINKS), undefined)
   assert.equal(recordLinkOf('glean', { url: `${GLEAN}.evil.com/x` }, LINKS), undefined)
-  const extra = configOf({ extraLinks: JSON.stringify([{ label: 'L', service: 'x', field: 'x_*', arg: 'q', base: 'https://wiki.example.com', template: '{base}/s/{value}' }]) })
+  const extra = configOf({ user: '[bases]\nwiki = "https://wiki.example.com"\n' })
   assert.equal(recordLinkOf('x', { permalink: 'https://wiki.example.com/p/1' }, extra), 'https://wiki.example.com/p/1')
   assert.equal(recordLinkOf('x', { permalink: 'https://wiki.example.com/p/1' }, LINKS), undefined)
 })
@@ -68,7 +68,7 @@ test('preview items carry a record link built from the configured host, never fr
   const [shown] = outcomeOf(jira, mcp(body), LINKS).preview ?? []
   assert.equal(shown?.items[0]?.url, `${SITE}/browse/DEV-1`)
   assert.equal(shown?.items[1]?.url, undefined)
-  const [other] = outcomeOf(jira, mcp(body), configOf({ atlassianBase: 'https://x.atlassian.net' })).preview ?? []
+  const [other] = outcomeOf(jira, mcp(body), configOf({ user: '[bases]\natlassian = "https://x.atlassian.net"\n' })).preview ?? []
   assert.equal(other?.items[0]?.url, 'https://x.atlassian.net/browse/DEV-1')
 })
 

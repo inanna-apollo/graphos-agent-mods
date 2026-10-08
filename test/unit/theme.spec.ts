@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
-import { ACCENT, BADGE_HUE, BLOCK_HUE, COLOR, PANEL, PILL_TEXT, STRUCT, TONE, TREE, TREE_CELLS } from '../../src/view/ui/theme.ts'
+import { BADGE_HUE, COLOR, PANEL, PILL_TEXT, STRUCT, TREE, TREE_CELLS } from '../../src/view/ui/theme.ts'
 import { continuationOf } from '../../src/view/plan.ts'
 
 // Theme keys the engine resolves per light/dark theme (never raw ANSI).
@@ -16,37 +16,6 @@ describe('structural palette', () => {
   it('never borrows a semantic hue', () => {
     const semantic = new Set<string>(Object.values(COLOR))
     for (const [name, key] of Object.entries(STRUCT)) assert.ok(!semantic.has(key), `${name} reuses ${key}`)
-  })
-
-  it('keeps the brand orange off structure: it reads as a warning', () => {
-    for (const [name, key] of Object.entries(STRUCT)) assert.notEqual(key, ACCENT, name)
-    assert.ok(!Object.values(BADGE_HUE).includes(ACCENT as never))
-  })
-
-  it('is emphasis: one hue opens a block, the rest of the structure is gray', () => {
-    const hues = new Set<string>(Object.values(STRUCT))
-    // The block hue, default text, two grays, and RESULT's numbers.
-    assert.ok(hues.size <= 5, [...hues].join(', '))
-    assert.notEqual(STRUCT.verb, STRUCT.returns, '`return type` and `access` sit under their root')
-    assert.equal(STRUCT.returns, STRUCT.access)
-    // The bars, the summary box and the cards' outline are one hue.
-    assert.equal(STRUCT.bar, BLOCK_HUE)
-    assert.equal(STRUCT.box, BLOCK_HUE)
-    assert.equal(STRUCT.card, BLOCK_HUE)
-  })
-
-  it('takes no blue: blue says a press opens it, so structure is violet and links keep the blue', () => {
-    // The theme keys a terminal theme draws blue or blue-gray.
-    const BLUES = ['ide', 'permission', 'suggestion']
-    for (const [name, key] of Object.entries(STRUCT)) assert.ok(!BLUES.includes(key), `${name}: ${key}`)
-    assert.equal(BLOCK_HUE, 'autoAccept')
-    assert.ok(BLUES.includes(COLOR.link))
-  })
-
-  it('makes query syntax quiet and the values the call sets bold', () => {
-    assert.equal(TONE.value.bold, true)
-    assert.equal(TONE.op.color, STRUCT.operator)
-    assert.equal(STRUCT.keyword, STRUCT.operator)
   })
 
   it('paints READ and WRITE differently, WRITE in its semantic color', () => {

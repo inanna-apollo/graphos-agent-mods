@@ -1,39 +1,22 @@
-// Hover cards: a name lights (inverse) under the pointer and its card pops
-// up beside it, one scope each. Everything the pane names teaches: a field
-// name (`coordinate · Type`, its description or that there is none, the type
-// in words with a line on GraphQL's notation, what it does in the paging,
-// policy, personal data, deprecation, scopes, what came back), an argument
-// name, set or left to its default (`name: Type`, what kind of value it is,
-// the value, the default, every hint, enum values), the root's verb (the
-// whole description, arguments left unset, paging), the policy meter (counts,
-// the denied and masked fields by path), and the header: the badge (what the
-// operation type is and what approving does), the services, the operation
-// name, the status word and the `summary · Haiku` eyebrow. Computed, never
-// the model's words.
-// A hover is a style the surface applies itself: no hook runs and no press
-// is needed, so it is the one detail a pending call can show.
+// Hover cards for fields, arguments, root verbs, policy counts and header labels.
+// Content comes from the operation, schema and outcome. The surface applies
+// hover styles without invoking hooks, including while a call is pending.
 //
-// A popover, never off screen: below the trigger's rows when there is at
-// least as much room under them as above in the rows in view (`scroll.offset`,
-// `scroll.bodyRows`), else above, from a small inset to the pane's right
-// edge. The plan says where each trigger is drawn (Plan.anchors). Cards are
-// the pane's last children, placed against the pane itself, so they paint
-// over every row (a card nested in its trigger's row is painted over by the
-// rows after it). Nothing wraps them: the engine clips an absolute Box to a
-// parent no rows tall, and the pointer on an absolute Box counts as on its
-// parent, so a wrapper spanning rows would take it off every trigger beneath
-// and no hover would light. Each card is
-// `display: none` until its group is lit, and is painted on an opaque PANEL
-// background so the rows beneath do not bleed through. Absolute, so showing
-// a card moves no row. Lit, it is one of its group, so it stays lit while
-// the pointer rests on it. The same on every surface.
+// Plan.anchors supplies trigger rows. Place the card above or below its
+// trigger according to available viewport space (`scroll.offset` and
+// `scroll.bodyRows`). Cards are the pane's last direct children so they
+// paint over subsequent rows. A wrapper would introduce engine clipping:
+// absolute Boxes are clipped to their parent's bounds, and their pointer
+// region counts toward the parent, which can block triggers underneath.
 //
-// The trigger (a Text while pending, a plain Button once settled) is a
-// direct child of a Box: on the terminal a Text nested in a Text follows its
-// group but cannot heat it. A name drawn twice lights the one card, placed
-// by the first.
+// Cards use `display: none` until their hover group is active, absolute
+// positioning to preserve layout, and an opaque PANEL background. The card
+// shares the trigger's group so it stays visible under the pointer.
 //
-// Schema text is untrusted: the description is escaped, quoted and dimmed.
+// Triggers are Text while pending and plain Buttons once settled, directly
+// inside a Box. Terminal Text nested in Text can follow a hover group but
+// cannot activate it. Repeated names share a card anchored to the first.
+// Schema descriptions are escaped, quoted and dimmed.
 
 import type { RenderChildren, RenderNode, TextHoverProps } from 'claude-code'
 
@@ -187,7 +170,7 @@ function wrap(text: string, width: number): string[] {
 
 /**
  * `text` word-wrapped to the full `width`, as a plain wrap fills it, except
- * that a paragraph never ends on one stray word (`your data.` alone on a
+ * that a paragraph does not end on a single word (`your data.` alone on a
  * row): the line before gives its last word to the last line, while that
  * still fits (CSS's `text-wrap: pretty`). Never more lines than a plain wrap.
  */
@@ -607,7 +590,7 @@ function Lines({ ctx, id, title, lines }: { ctx: Ctx; id: string; title: string;
  * The header's cards, as a list for the pane's root (Frame): the badge (what
  * the operation type is and what approving does), the services and the
  * roots each serves, the operation name (the agent's own label), the status
- * word, and the `summary · Haiku` eyebrow (who wrote the headline from what).
+ * word, and the `summary · Haiku` credit (model and input sources).
  */
 export function headerCards(ctx: Ctx, call: InspectedCall, waiting: number): RenderNode[] {
   const { Text } = ctx.kit

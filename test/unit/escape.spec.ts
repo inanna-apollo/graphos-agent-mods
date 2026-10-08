@@ -103,7 +103,7 @@ test('a 10,000-char string is capped at the default max', () => {
   assert.ok(result.text.endsWith('…'))
 })
 
-test('a 10,000-char hostile string stays safe and capped', () => {
+test('a 10,000-character string of terminal sequences is escaped and capped', () => {
   const result = escapeText('\x1b[31m'.repeat(2_000), 10_000)
   assert.equal(result.isTruncated, true)
   assert.ok(!result.text.includes('\x1b'))
@@ -116,7 +116,7 @@ test('truncation does not cut an escape in a way that exposes a raw control', ()
   }
 })
 
-test('output never holds a raw ESC, CR, or other control, for hostile inputs', () => {
+test('generated control-sequence inputs produce no raw ESC, CR or other controls', () => {
   const pieces = ['\x1b', '\x1b[', '\x1b[31m', '\x1b]', '\x1b]0;x', '\x07', '\x1b\\', '\r', '\x00', '\x7f', '\x9b', '\x9d', '\u202e', '\u2066', 'a', '[', ']', '\\', ';']
   let seed = 12345
   const next = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff)

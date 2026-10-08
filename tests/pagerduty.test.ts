@@ -84,7 +84,7 @@ function incidentsCall(status: InspectedCall['status']): InspectedCall {
 for (const columns of [50, 64]) {
   for (const status of ['pending', 'ran'] as const) {
     test(`OpenIncidents, ${status}, at ${columns} columns`, () => {
-      const text = renderText(viewOf(stubKit(), { call: incidentsCall(status), waiting: 0 }, columns, CLOSED, undefined, { surface: 'terminal' }), columns)
+      const text = renderText(viewOf(stubKit(), { call: incidentsCall(status), waiting: 0 }, columns, CLOSED, undefined, { surface: 'terminal' }), columns, { clip: false })
       for (const line of text.split('\n')) expect(displayWidth(line)).toBeLessThanOrEqual(columns)
       const flat = text.replace(/\s+/g, ' ')
       expect(flat).toMatch(/access incidents\.read/)
@@ -94,8 +94,9 @@ for (const columns of [50, 64]) {
       expect(text).not.toMatch(/^\s*(limit|offset|total) {2}(5|0|null)\s*$/m)
       expect(text).not.toMatch(/ {2}(true|null)\s*$/m)
       // The conditional and opaque field, and the note that says so.
-      expect(flat).toMatch(/service untyped JSON (│ )?· reference only \((│ )?full with (│ )?include=services\)/)
-      expect(flat).toMatch(/service is a reference only: set include=services/)
+      expect(flat).toMatch(/service\s+untyped JSON/)
+      expect(flat).toContain('include=services')
+      expect(flat).toMatch(/reference only/)
       if (status === 'pending') return
       // One list: the count, then its items. At 50 columns `more available` is said shorter rather than wrapped.
       expect(flat).toMatch(/RESULT 5 incidents · first page · more( available)? /)

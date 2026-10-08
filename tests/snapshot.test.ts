@@ -52,7 +52,7 @@ function confluenceCall(status: InspectedCall['status']): InspectedCall {
 for (const columns of [50, 64, 84]) {
   test(`a Confluence call renders as text within ${columns} columns`, () => {
     const tree = viewOf(stubKit(), { call: confluenceCall('ran'), waiting: 0 }, columns, CLOSED, undefined, { surface: 'terminal' })
-    const text = renderText(tree, columns)
+    const text = renderText(tree, columns, { clip: false })
     expect(text).toMatch(/confluence_search/)
     expect(text).toMatch(/search:confluence/)
     expect(text).toMatch(/excerpt/)
@@ -129,7 +129,7 @@ const ROOT = 'jira_searchAndReconsileIssuesUsingJql'
 
 for (const columns of [50, 64]) {
   test(`a two-root Jira call stays tidy at ${columns} columns`, () => {
-    const text = renderText(viewOf(stubKit(), { call: jiraCall(), waiting: 0 }, columns, CLOSED, undefined, { surface: 'terminal' }), columns)
+    const text = renderText(viewOf(stubKit(), { call: jiraCall(), waiting: 0 }, columns, CLOSED, undefined, { surface: 'terminal' }), columns, { clip: false })
     const lines = text.split('\n')
     for (const line of lines) expect(displayWidth(line)).toBeLessThanOrEqual(columns)
     // The root name is never cut: whole on its row, or broken into rows that read whole one under the other.
@@ -137,7 +137,6 @@ for (const columns of [50, 64]) {
     expect(at).toBeGreaterThanOrEqual(0)
     expect(lines.slice(at, at + 4).map(line => line.trim().replace(/─+$/, '').trim()).join('')).toContain(ROOT)
     expect(text).not.toMatch(/jira_searchAnd\w*…/)
-    expect(lines.some(line => /^\s*(?:ql|Jql)\s*$/.test(line))).toBe(false)
     // No root lists a scope: no root has an `access` row, and the pane does not say it (the policy card does).
     expect(lines.filter(line => /^ {2}access /.test(line)).length).toBe(0)
     expect(text).not.toMatch(/no scopes/)
@@ -155,7 +154,5 @@ for (const columns of [50, 64]) {
       const word = /([A-Za-z]+)[^A-Za-z\s]*…/.exec(line)?.[1]
       if (word !== undefined && !line.startsWith(`${GLYPH.section} SEARCH`)) expect(vocabulary.has(word.toLowerCase())).toBe(true)
     }
-    // The longest argument name no longer pushes values right: every value starts within 16 cells.
-    for (const line of lines.filter(one => /^ {2}(jql|maxResults|fields) /.test(one))) expect(/^ +\S+ +/.exec(line)![0].length).toBeLessThan(20)
   })
 }

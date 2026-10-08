@@ -5,7 +5,7 @@ import { expect, test } from 'claude-code/testing'
 import { pretty } from '../src/view/ui/hover.tsx'
 import { cellWidth } from '../src/view/plan.ts'
 
-const SAID = 'Haiku, a small Claude model, wrote the headline from the operation and the schema only: never the response, never your data.'
+const SAID = 'A card paragraph with enough words to wrap across several lines must keep its complete contents across narrow and wide widths.'
 
 test('a wrapped card paragraph fills its width, keeps its words, and never strands one word on its last line', () => {
   for (let width = 20; width <= 140; width++) {

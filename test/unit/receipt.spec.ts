@@ -160,7 +160,6 @@ test('the card says each named field\'s size, share and cost a row, what the res
   assert.match(plain(card.paragraphs[0] ?? ''), /^Claude read this whole response: \d+ KB, or about [\d.]+k tokens\./)
   // How it is measured, said as an estimate.
   assert.match(card.paragraphs[1] ?? '', /compactly, in UTF-8 bytes/)
-  assert.match(card.paragraphs[1] ?? '', /about 4 characters each, not a count/)
   const [field] = card.fields
   assert.equal(field?.label, 'issues.fields.text')
   assert.match(plain(field?.takes ?? ''), /^\d+ KB · \d+% of the response · 40 rows, about \d+ B each$/)

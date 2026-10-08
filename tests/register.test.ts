@@ -1,8 +1,6 @@
 import type { On } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 
-import { configOf } from '../src/links.ts'
-
 const SERVER = 'claude_ai_GraphOS_Agent_Services'
 const EXECUTE = `mcp__${SERVER}__execute`
 const GAS_TOOLS = ['execute', 'validate', 'introspect', 'dry_run'].map(tool => ({
@@ -69,6 +67,16 @@ test('a server without the full Agent Services tool set (github: no dry_run) is 
   expect(await pane.find({ text: /No GraphOS Agent Services call yet/ })).toBeDefined()
 })
 
+test('another server with every Agent Services tool is left alone: only the claude.ai connector is inspected', async ($, on) => {
+  const tools = ['execute', 'validate', 'introspect', 'dry_run', 'search'].map(tool => ({ name: `mcp__github__${tool}`, description: '', mcp: true }))
+  on('tool.list', () => ({ value: tools }))
+  on('tool.call', { tool: 'mcp__github__execute' }, () => ({ result: { content: [], isError: false } }))
+  await $.tool.call({ tool: 'mcp__github__execute', operation: '{ a }' })
+
+  const pane = await $.ui.mount({ plugin: 'graphos-agent-mods', surface: 'terminal', component: 'Pane', requestId: 'gas', props: PANE_PROPS })
+  expect(await pane.find({ text: /No GraphOS Agent Services call yet/ })).toBeDefined()
+})
+
 test('the call reaches the server unchanged', async ($, on) => {
   mock.clock(on)
   on('tool.list', () => ({ value: GAS_TOOLS }))
@@ -124,29 +132,24 @@ test('policy from dry_run reaches the pane while the call waits at its prompt', 
   await running
 })
 
-// The mod must never raise a dialog of its own: without an allow rule for
-// the read-only Agent Services tools it makes no Agent Services calls and says access is unknown.
-test('without allow rules for the Agent Services tools, the mod makes no Agent Services calls', async ($, on) => {
-  const clock = mock.clock(on)
-  const tools: string[] = []
-  on('tool.list', () => ({ value: GAS_TOOLS }))
-  on('tool.check', () => ({ decision: 'ask' as const }))
-  on('mcp.call', (_, e) => {
-    tools.push(e.tool)
-    return payload({})
+for (const decision of ['ask', 'deny'] as const) {
+  test(`enrichment makes no calls when tool permission is ${decision}`, async ($, on) => {
+    const clock = mock.clock(on)
+    const tools: string[] = []
+    on('tool.list', () => ({ value: GAS_TOOLS }))
+    on('tool.check', () => ({ decision }))
+    on('mcp.call', (_, e) => { tools.push(e.tool); return payload({}) })
+    on('tool.call', { tool: EXECUTE }, () => ({ result: { content: [], isError: false } }))
+    on('session.start', () => ({ cwd: '/tmp' }))
+    on('command.register', (_, e) => ({ value: { command: e.name } }))
+    await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+    await $.tool.call({ tool: EXECUTE, operation: OPERATION, variables: VARIABLES })
+    await clock.advance(1_000)
+    expect(tools).toEqual([])
+    const pane = await $.ui.mount({ plugin: 'graphos-agent-mods', surface: 'terminal', component: 'Pane', requestId: 'gas', props: PANE_PROPS })
+    expect(await pane.find({ text: /confluence_search/ })).toBeDefined()
   })
-  on('tool.call', { tool: EXECUTE }, () => ({ result: { content: [], isError: false } }))
-  on('session.start', () => ({ cwd: '/tmp' }))
-  on('command.register', (_, e) => ({ value: { command: e.name } }))
-  await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
-
-  await $.tool.call({ tool: EXECUTE, operation: OPERATION, variables: VARIABLES })
-  await clock.advance(1_000)
-
-  expect(tools).toEqual([])
-  const pane = await $.ui.mount({ plugin: 'graphos-agent-mods', surface: 'terminal', component: 'Pane', requestId: 'gas', props: PANE_PROPS })
-  expect(await pane.find({ text: /confluence_search/ })).toBeDefined()
-})
+}
 
 // A hot reload may skip session.start (seen in other mods): the first Agent Services
 // call must still start the pump.
@@ -256,6 +259,13 @@ const SDL = {
 test('roots across services get policy per root, every service in the header, and a summary', async ($, on) => {
   const clock = mock.clock(on)
   const scopesChecked = new Set<string>()
+  let summaryReady!: () => void
+  const isSummaryReady = new Promise<void>(resolve => (summaryReady = resolve))
+  on('state.set', { plugin: 'graphos-agent-mods', key: 'calls' }, async (_, e, next) => {
+    const answer = await next(e)
+    if (answer.value?.isSet && [...e.value.queue, ...e.value.history].some(call => call.ir.summary !== undefined)) summaryReady()
+    return answer
+  })
   on('tool.list', () => ({ value: GAS_TOOLS }))
   on('tool.check', () => ({ decision: 'allow' as const }))
   on('mcp.call', (_, e) => {
@@ -283,6 +293,8 @@ test('roots across services get policy per root, every service in the header, an
 
   await $.tool.call({ tool: EXECUTE, operation: GNARLY, variables: JSON.stringify({ jql: 'project = A' }) })
   await clock.advance(1_000)
+  // WebCrypto and worker replies can finish after the mock clock's advance.
+  await isSummaryReady
 
   expect([...scopesChecked].sort()).toEqual(['acme-customer-data', 'jira'])
   const pane = await $.ui.mount({ plugin: 'graphos-agent-mods', surface: 'terminal', component: 'Pane', requestId: 'gas', props: { ...PANE_PROPS, bodyColumns: 80 } })
@@ -300,7 +312,7 @@ test('roots across services get policy per root, every service in the header, an
 
 const snapshotRun = { command: 'gas', args: 'snapshot', origin: { kind: 'composer' as const }, presentation: { isFullscreen: false, columns: 80 } }
 
-// `/gas snapshots on` is how they are turned on (kept in the plugin store); there is no option for it.
+// `/gas snapshots on` enables them (kept in the plugin store); the manifest declares no snapshot option.
 const snapshotsOn = { command: 'gas', args: 'snapshots on', origin: { kind: 'composer' as const }, presentation: { isFullscreen: false, columns: 80 } }
 
 /** A plugin store that remembers, as the real one does between sessions. */
@@ -371,17 +383,17 @@ test('/gas snapshot writes the shown call at the default widths, snapshots on or
 // ---- links.toml: /gas links loads the shipped file and the person's override
 
 test('/gas links reloads the override file under $HOME and counts its rules', async ($, on) => {
+  const shipped = '[bases]\natlassian = "https://fixture.example"\n\n[[record]]\nservice = "fixture"\nfield = "id"\nurl = "{atlassian}/records/{value}"\n'
   const reads: string[] = []
   on('process.run', (_, e) => ({ value: { exitCode: 0, stdout: e.argv[0] === 'printenv' ? '/home/me\n' : 'Linux\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
   on('fs.read', (_, e) => {
     reads.push(e.path)
     if (e.path.endsWith('/.claude/graphos-agent-mods/links.toml')) return { value: '[[record]]\nservice = "x"\nfield = "id"\nurl = "{atlassian}/x/{value}"\n' }
+    if (e.path.endsWith('/links.toml')) return { value: shipped }
     throw new Error('ENOENT')
   })
   const answer = await $.command.run({ command: 'gas', args: 'links', origin: { kind: 'composer' as const }, presentation: { isFullscreen: false, columns: 80 } })
   expect(reads).toContain('/home/me/.claude/graphos-agent-mods/links.toml')
   expect(JSON.stringify(answer)).toMatch(/\/home\/me\/\.claude\/graphos-agent-mods\/links\.toml \(loaded\)/)
-  // The shipped rules (embedded fallback, the file is unreadable here) and the one override, however many rules links.toml ships.
-  const shipped = configOf(undefined)
-  expect(JSON.stringify(answer)).toContain(`${shipped.records.length + 1} row rules, ${shipped.searches.length} search links`)
+  expect(JSON.stringify(answer)).toContain('2 row rules, 0 search links')
 })

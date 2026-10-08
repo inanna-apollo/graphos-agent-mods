@@ -342,14 +342,15 @@ function joinCells(widths: number[], cells: string[][], gap: number, inner: numb
 /**
  * The tree as text, `columns` cells wide at most. Styling is dropped; a
  * Client draws its still line (`✻ text`), a Button as `hotkey: label`.
+ * Disable clipping to diagnose layout overflow before the snapshot hides it.
  */
-export function renderText(tree: unknown, columns: number): string {
+export function renderText(tree: unknown, columns: number, options: { clip?: boolean } = {}): string {
   const width = Math.max(1, Math.floor(columns))
   const rows = flatten(tree).flatMap(node => render(node, width))
   return rows
     .map(row => {
       const trimmed = row.trimEnd()
-      return displayWidth(trimmed) > width ? takeCells(trimmed, width) : trimmed
+      return options.clip !== false && displayWidth(trimmed) > width ? takeCells(trimmed, width) : trimmed
     })
     .join('\n')
     .replace(/\n+$/, '')

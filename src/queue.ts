@@ -6,7 +6,7 @@
 
 import type { CallStatus, InspectedCall, InspectorCalls } from '../types'
 import { isRecord } from './guards.ts'
-import { compactOutcome } from './result.ts'
+import { compactOutcome, truncationOf } from './result.ts'
 
 export const EMPTY: InspectorCalls = { queue: [], last: null, history: [] }
 
@@ -188,6 +188,9 @@ const REFUSED = /doesn't want to proceed with this tool use|tool use was rejecte
 export function statusOf(result: { deny?: unknown; isError?: unknown; result?: unknown; text?: unknown }): Exclude<CallStatus, 'pending'> {
   if (result.deny !== undefined) return 'denied'
   if (result.isError !== true) return 'ran'
+  // The engine can flag a saved-output stand-in as an error even though the
+  // operation ran. Only a recognized engine tool-results path qualifies.
+  if ((truncationOf(result.text) ?? truncationOf(result.result))?.path !== undefined) return 'ran'
   const text = [result.text, result.result].find((one): one is string => typeof one === 'string') ?? ''
   return REFUSED.test(text) ? 'denied' : 'errored'
 }

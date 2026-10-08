@@ -1,5 +1,6 @@
 // Which selected fields look like personal data, by their real names' words.
-// Pure: no $. A hint for the reader, not a classification.
+// Name-based annotations are heuristic; schema classifications are handled separately.
+// Pure: no $.
 
 import { escapeText } from '../escape.ts'
 import type { FieldIR } from '../ir.ts'
@@ -32,7 +33,7 @@ export function classifiedOf(field: FieldIR): string | undefined {
   return undefined
 }
 
-// Object fields that are a person: marked once with a quiet `person` tag, not ◆.
+// Person objects receive a `person` tag. The ◆ marker is reserved for leaf fields.
 const PERSON_NAMES: ReadonlySet<string> = new Set(['creator', 'user', 'assignee', 'author', 'owner', 'reporter', 'sender', 'recipient', 'member'])
 const PERSON_TYPE = /(?:User|Person|Member|Actor|UserSlim)$/
 

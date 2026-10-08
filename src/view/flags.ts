@@ -132,10 +132,12 @@ function deniedIn(outcome: CallOutcome, root: FieldIR, name: string) {
 }
 
 /** Why a background check failed, in a few plain words; undefined for an error with no known cause (the card has it). */
+const NOT_ALLOWED = 'the read-only tools are not allowed'
+
 export function checkFailureWords(error: string | undefined): string | undefined {
   if (error === undefined || error === '') return undefined
   if (/doesn't want to proceed|rejected|refused|interrupt|abort|cancel/i.test(error)) return 'the call was stopped'
-  if (/not allowed without a prompt|permission/i.test(error)) return 'the read-only tools are not allowed (/gas setup)'
+  if (/not allowed without a prompt|permission/i.test(error)) return NOT_ALLOWED
   if (/time(d)? ?out|no answer/i.test(error)) return 'no answer in time'
   if (/sign.?in|auth/i.test(error)) return 'a sign-in is needed'
   return undefined
@@ -298,7 +300,9 @@ export function flagsOf(ir: CallIR, outcome?: CallOutcome, isSettled = false): F
     const why = checkFailureWords(raw)
     flags.push({
       text: `${failed.join(' and ')} not checked${why === undefined ? '' : `: ${why}`}`,
-      detail: `Agent Services could not check this call's ${failed.join(' or ')}${raw === undefined ? '.' : `. The error: ${esc(raw, 600)}`}`,
+      detail: why === NOT_ALLOWED
+        ? `The pane checks a call's ${failed.join(' and ')} with Agent Services' read-only tools (search, introspect, validate and dry_run), and only where your permission settings already allow them, so it never adds a dialog of its own. To have it check, allow them in /permissions, or choose "don't ask again" when Claude itself first uses one. None of them changes data.`
+        : `Agent Services could not check this call's ${failed.join(' or ')}${raw === undefined ? '.' : `. The error: ${esc(raw, 600)}`}`,
       tone: 'warn',
     })
   }

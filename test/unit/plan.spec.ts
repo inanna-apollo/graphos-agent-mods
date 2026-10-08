@@ -52,8 +52,6 @@ function confluence(withSummary = true): CallIR {
     summary: {
       headline:
         'Searches Confluence for pages mentioning "query plan", newest first, up to ten [[Confluence_SearchResultItem.title]] hits.',
-      details: [],
-      concerns: [],
     },
   }
 }
@@ -126,8 +124,6 @@ function jira(): CallIR {
     summary: {
       headline:
         'Searches up to 500 Jira issues in DEV, OPS and CORE that are open, assigned to you and labelled for triage, with their status, people, comments and components, and also lists every project and board.',
-      details: [],
-      concerns: [],
     },
   }
 }
@@ -341,7 +337,7 @@ test('sectionGap widens every section gap, and the plan still fits', () => {
 test('an annotated leaf breaks out onto its own row; the leaves around it stay joined', () => {
   const root = confluence().roots[0]!
   const plain = returnLines(root)
-  const notes = new Map([['Confluence_SearchResultItem.url', { note: 'link to the page', isAttention: false }]])
+  const notes = new Map([['Confluence_SearchResultItem.url', { note: 'link to the page', isAttention: false, isPersonal: false }]])
   const lines = returnLines(root, false, Infinity, field => notes.get(field.coordinate))
   const url = lines.find(line => line.fields.length === 1 && line.fields[0]!.name === 'url')
   assert.equal(url?.annotation?.note, 'link to the page')
@@ -405,7 +401,7 @@ test('cells: emoji a terminal draws wide count two, the pane’s own glyphs one'
   for (const narrow of ['✓', '✕', '◐', '◆', '⚑', '↗', '▰', 'a']) assert.equal(cellWidth(narrow), 1, narrow)
 })
 
-test('a name wider than its row breaks at its own seams, never cut, every row within the width', () => {
+test('a name wider than its row wraps at name boundaries and preserves all characters within the width', () => {
   const rows = nameRows('acme_customer_data_listOrganizationMembers', 30)
   assert.equal(rows.join(''), 'acme_customer_data_listOrganizationMembers')
   for (const row of rows) assert.ok(cellWidth(row) <= 30, row)

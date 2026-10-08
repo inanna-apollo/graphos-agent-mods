@@ -170,7 +170,7 @@ export function cardOf(receipt: Receipt): ReceiptCard {
         receipt.isApproximate ? ' The pane did not read the file, so it cannot say which fields took the room.' : ` Read in full, it would take ${tokens}.`
       }`
     : `Claude read this whole response: ${read}, or ${tokens}.${receipt.fields.length > 0 ? ' The fields below took most of it.' : ''}`
-  const how = `Sizes are the response's JSON written compactly, in UTF-8 bytes (1 KB is 1,024 bytes). Tokens are an estimate at about 4 characters each, not a count.${
+  const how = `Sizes are the response's JSON written compactly, in UTF-8 bytes (1 KB is 1,024 bytes). Tokens are estimated as bytes divided by four, not counted from the model's tokenizer.${
     receipt.isCapped ? ' The response had more fields than the pane tracks, so some detail is counted in the field above it.' : ''
   }`
   return {

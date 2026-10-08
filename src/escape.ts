@@ -1,11 +1,10 @@
 // Make model- and schema-written strings safe to draw. Pure: no $.
 //
-// Terminal control sequences, other C0/C1 controls, bidi overrides and
-// invisible characters are shown as visible escapes rather than
-// interpreted, so a hostile argument cannot recolor the pane, move the
-// cursor, reorder what you read or hide text in plain sight.
+// Render terminal sequences, C0/C1 controls, bidi overrides and invisible
+// characters as visible escapes. Input text cannot change terminal colors,
+// move the cursor or alter the displayed text order.
 
-// An unterminated OSC stops at the line's end rather than eating the rest.
+// An unterminated OSC stops at the line's end.
 const SEQUENCE = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b\n]*(?:\x07|\x1b\\)?|\x1b[@-_]?/g
 const CONTROL = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g
 // Bidi overrides and isolates, zero-width characters, line separators.

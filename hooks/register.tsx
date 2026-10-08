@@ -12,8 +12,8 @@ import { adaptExecute } from '../src/adapter.ts'
 import { escapeText } from '../src/escape.ts'
 import { annotate } from '../src/annotate.ts'
 import { buildIR } from '../src/build.ts'
-import { emptyCache, enrich, scopesOf } from '../src/enrich.ts'
-import type { CallGas } from '../src/enrich.ts'
+import { cacheForServer, enrich, isAllowedWithoutPrompt, scopesOf } from '../src/enrich.ts'
+import type { CallGas, EnrichCache } from '../src/enrich.ts'
 import { normalize } from '../src/normalize.ts'
 import { allowedOrigins, configOf, loadLinkConfig } from '../src/links.ts'
 import type { BaseSource, LinkConfig } from '../src/links.ts'
@@ -49,8 +49,8 @@ import { findCall, planSnapshots } from '../src/snapshot/write.ts'
 import type { SnapshotOptions } from '../src/snapshot/options.ts'
 
 const PANE = 'gas'
-// Every MCP server's `execute` tool (the hook matchers spell it inline): the Agent Services one among them, told apart by isGasServer.
-const EXECUTE_TOOL = /^mcp__.+__execute$/
+// The claude.ai connector's `execute` (src/servers.ts CONNECTOR; the hook matchers spell it inline): no other server's calls reach the hooks.
+const EXECUTE_TOOL = /^mcp__claude_ai_GraphOS_Agent_Services__execute$/
 const TITLE = 'GraphOS Inspector'
 // The raw operation of the call shown, in its own docked pane.
 const RAW_PANE = 'gas-raw'
@@ -109,11 +109,9 @@ async function retitleRaw($: EngineInterface) {
 
 const paneUi = atom({ plugin: 'graphos-agent-mods', key: 'paneUi' } as const, CLOSED)
 
-// Which MCP servers are Agent Services, from $.tool.list. A hit is kept until a reload
-// (a stale one costs one tool.list). A miss stands for SERVERS_TTL_MS where a
-// row draws, so a github or jira `execute` row does not list every tool on
-// every redraw; a call itself always looks again, since a server can connect
-// after the session starts.
+// Cache server discovery to avoid listing tools on every transcript redraw.
+// Negative results expire after SERVERS_TTL_MS. Actual calls refresh the list
+// because a server may have connected since the previous lookup.
 const SERVERS_TTL_MS = 30_000
 let servers: Set<string> | undefined
 // When a listing last said each server is not Agent Services ($.clock time).
@@ -121,9 +119,9 @@ const misses = new Map<string, number>()
 // The listing in flight, shared by every row drawing at once.
 let listing: Promise<Set<string>> | undefined
 // Schema and scope lookups, valid for one bundleDigest (enrich clears it on a change).
-const cache = emptyCache()
-// Calls this instance has analysed or is analysing: each gets one attempt,
-// never an automatic retry, however its pipeline ended.
+const caches = new Map<string, EnrichCache>()
+// Calls already claimed by this instance's analysis pump. Enrichment handles
+// its own bounded retry when the server's schema generation changes.
 const attempted = new Set<string>()
 // Summaries by cacheKey (operation, variables, bundleDigest, prompt); null
 // when Haiku's answer failed the checks, so a rejected one is not re-asked.
@@ -232,8 +230,9 @@ function gasCaller($: EngineInterface, server: string): CallGas {
     if (!READ_ONLY_GAS_TOOLS.has(tool)) throw new Error(`GraphOS Inspector never calls ${String(tool)}`)
     const name = `mcp__${server}__${tool}`
     // Allowed by the person's rules, and not capped below allow by their organization.
-    const { decision, ceiling } = await $.tool.check({ tool: name, input: args })
-    if (decision !== 'allow' || (ceiling !== undefined && ceiling !== 'allow')) throw new NotAllowed(name, ceiling !== undefined && ceiling !== 'allow' ? ceiling : decision)
+    const verdict = await $.tool.check({ tool: name, input: args })
+    const { decision, ceiling } = verdict
+    if (!isAllowedWithoutPrompt(verdict)) throw new NotAllowed(name, ceiling !== undefined && ceiling !== 'allow' ? ceiling : decision)
     return $.mcp.call(server, tool, args)
   }
 }
@@ -325,8 +324,7 @@ async function summarize($: EngineInterface, call: InspectedCall, enrichMs: numb
   await snap($, call.id, 'summary')
 }
 
-// How long one step of a call's analysis (Agent Services' checks, Haiku's headline) may
-// take before the pane stops waiting on it and says so.
+// Timeout for each analysis stage: Agent Services checks and the headline.
 const STEP_MS = 20_000
 
 class StepTimeout extends Error {
@@ -379,7 +377,7 @@ async function analyse($: EngineInterface, call: InspectedCall) {
     if (ir.state === 'analyzing') {
       const started = await $.clock.now()
       try {
-        ir = await withinStep($, 'Agent Services', enrich(gasCaller($, call.server), cache, ir, call.operation, variablesOf(call)))
+        ir = await withinStep($, 'Agent Services', enrich(gasCaller($, call.server), cacheForServer(caches, call.server), ir, call.operation, variablesOf(call)))
       } catch (error) {
         ir = failedIR(ir, error)
       }
@@ -476,7 +474,7 @@ async function verdictsOf($: EngineInterface, calls: readonly { tool: string; to
 
 /** The verdict line of a call (src/view/notice.ts): with the outcome once it ran. */
 const verdictOf = (call: InspectedCall) => {
-  // A call the trust rules let through says so first: no dialog asked about it. One ✓ leads the line.
+  // Lead with trust-rule attribution and avoid repeating the checkmark.
   const trusted = trustVerdictOf(call.trust)
   const notice = noticeOf(call.ir, call.status === 'ran' ? call.outcome : undefined)
   const parts = [trusted, trusted !== undefined && notice?.startsWith('✓ ') === true ? notice.slice(2) : notice].filter(part => part !== undefined)
@@ -634,14 +632,13 @@ const DIALOG_OPEN = 'close the open dialog first, then try again'
 const NOT_TAKEN = 'the prompt box did not take it'
 
 /**
- * Puts `draft` in the prompt box for the person to read, edit and send:
- * after what they have typed, never over it. Nothing is sent. Resolves with
- * why it could not be drafted, or undefined when it was. Never rejects.
+ * Appends a draft to the prompt box without submitting it or replacing existing
+ * text. Returns a failure reason or undefined on success; does not reject.
  */
 async function fillPrompt($: EngineInterface, draft: string): Promise<string | undefined> {
   try {
     const box = await $.prompt.read()
-    // Already in the box (a second press, a double click): drafted once is enough.
+    // Repeated clicks must not duplicate the draft.
     if (box.text.includes(draft)) return undefined
     const { isFilled, refusal } = box.text.trim() === '' ? await $.prompt.fill({ text: draft }) : await $.prompt.fill({ text: `\n${draft}`, mode: 'append' })
     return isFilled ? undefined : refusal === 'no_composer' ? NO_COMPOSER : DIALOG_OPEN
@@ -651,9 +648,8 @@ async function fillPrompt($: EngineInterface, draft: string): Promise<string | u
 }
 
 /**
- * Drafts `draft` (what the person is shown it as: `what`) from a pane press. Filing an
- * access request is a write, and Claude asks before it files one; nothing is sent here.
- * A failure is one transcript line, not a toast: a pane opened to hold toasts (any plugin's) would keep a toast unseen.
+ * Drafts an access request for review. Submission requires a separate user action.
+ * Report failures in the transcript because another pane may be holding toasts.
  */
 async function draftPrompt($: EngineInterface, draft: string, what = 'the access request') {
   const why = await fillPrompt($, draft)
@@ -706,8 +702,7 @@ async function userFile($: EngineInterface, name: string): Promise<string | unde
 const userLinksFile = ($: EngineInterface) => userFile($, 'links.toml')
 
 // Link mappings: the shipped links.toml plus the person's override file; loaded at session.start and on `/gas links`.
-let pluginOptions: unknown
-let linkConfig: LinkConfig = configOf(undefined)
+let linkConfig: LinkConfig = configOf()
 // Where each named base in linkConfig comes from (src/links.ts BaseSource), as of the last load.
 let baseSources: Record<string, BaseSource> = {}
 let hasLoadedLinks = false
@@ -736,7 +731,7 @@ async function reloadLinks($: EngineInterface): Promise<{ file: string | undefin
   const file = await userLinksFile($)
   const user = file === undefined ? undefined : await readText($, file)
   const shipped = await readText($, `${$.plugin.root}/links.toml`)
-  const loaded = loadLinkConfig(pluginOptions, { ...(shipped !== undefined && { shipped }), ...(user !== undefined && { user }), learned: await readLearned($) })
+  const loaded = loadLinkConfig({ ...(shipped !== undefined && { shipped }), ...(user !== undefined && { user }), learned: await readLearned($) })
   linkConfig = loaded.config
   baseSources = loaded.baseSources
   hasLoadedLinks = true
@@ -969,7 +964,7 @@ async function noteVersion($: EngineInterface) {
   if (note !== undefined) $.ui.log(`GraphOS Inspector: ${note}`)
 }
 
-/** What the permission check says of one tool, as gasCaller reads it: only `allow` with no organization cap below it is a go. */
+/** Tool availability after applying the permission decision and organization ceiling. */
 async function toolState($: EngineInterface, tool: string): Promise<ToolState> {
   try {
     const { decision, ceiling } = await $.tool.check({ tool, input: {} })
@@ -985,11 +980,9 @@ async function toolState($: EngineInterface, tool: string): Promise<ToolState> {
 const SETUP_SEARCH_MS = 8_000
 
 /**
- * `/gas setup`: where each thing the mod needs stands, and the next step for
- * each that is not done (src/setup.ts words it). Only reads and checks: the
- * one Agent Services tool it calls is `search` for the graph's catalog, where it
- * is allowed, and the one thing it writes is a question drafted into the
- * prompt box, which the person reads and sends (or not).
+ * Collect setup requirements and pass them to src/setup.ts for display.
+ * Catalog discovery uses an allowed search call. Site discovery is drafted
+ * into the prompt box for the user to review and submit.
  */
 async function setupText($: EngineInterface): Promise<string> {
   const version = await claudeVersion($)
@@ -1005,8 +998,8 @@ async function setupText($: EngineInterface): Promise<string> {
   // Which sites the graph has a service for, from its catalog (one search, only where it is allowed): a graph with no Jira or Slack is not asked about them.
   const first = servers?.[0]
   const unset = learnable(baseSources)
-  const scopes = first === undefined || unset.length === 0 ? undefined : await withinStep($, 'Agent Services', scopesOf(gasCaller($, first), cache), SETUP_SEARCH_MS).catch(() => undefined)
-  // An empty catalog is a reply that could not be read, not a graph with no services.
+  const scopes = first === undefined || unset.length === 0 ? undefined : await withinStep($, 'Agent Services', scopesOf(gasCaller($, first), cacheForServer(caches, first)), SETUP_SEARCH_MS).catch(() => undefined)
+  // An empty catalog leaves the available services unknown.
   const graph = scopes === undefined || scopes.length === 0 ? undefined : sitesOfGraph(scopes)
   const asked = graph === undefined ? [] : unset.filter(site => graph.shown.includes(site) && graph.askable.includes(site))
   const isAsking = asked.length > 0
@@ -1114,9 +1107,8 @@ function trustSaved($: EngineInterface) {
 }
 
 export const register: Register = (on, options) => {
-  // Deep-link hosts and extra templates, from the plugin's configuration.
-  pluginOptions = options
-  linkConfig = configOf(options)
+  // Start with shipped links; session setup loads user mappings and learned sites.
+  linkConfig = configOf()
   hasLoadedLinks = false
   snapshots = snapshotOptionsOf(options)
   on('session.start', async ($, e, next) => {
@@ -1229,7 +1221,7 @@ export const register: Register = (on, options) => {
     return { text: opened.isPlaced ? 'GraphOS Inspector opened.' : 'GraphOS Inspector could not open here.' }
   })
 
-  on('tool.call', { tool: /^mcp__.+__execute$/ }, async ($, e, next) => {
+  on('tool.call', { tool: /^mcp__claude_ai_GraphOS_Agent_Services__execute$/ }, async ($, e, next) => {
     const server = splitMcpTool(e.tool)?.server
     if (server === undefined || !(await isGasServer($, server, { isFresh: true }))) return next(e)
 
@@ -1286,15 +1278,16 @@ export const register: Register = (on, options) => {
     // The call ran and Claude has its result as the engine gave it: reading the response for the pane can fail on its own, and never makes the call look errored.
     try {
       await ensureLinks($)
-      const settled = await updateCalls($, state => settle(state, e.tool_use_id, statusOf(ran)))
+      const status = statusOf(ran)
+      const settled = await updateCalls($, state => settle(state, e.tool_use_id, status))
       void snap($, e.tool_use_id, 'settled')
       // Counted as unasked once it ran, and only if a trust rule (never the engine's own allow) let it through.
-      if (statusOf(ran) === 'ran' && findCall(settled, e.tool_use_id)?.trust?.isAllowed === true) void countUnasked($)
+      if (status === 'ran' && findCall(settled, e.tool_use_id)?.trust?.isAllowed === true) void countUnasked($)
       // An errored call (refused at the dialog, or the tool failed) carries
       // the engine's text, not a GraphQL response: no RESULT for it.
       // An oversized result comes back as an error text naming the file Claude Code saved it to.
-      const stood = ran.deny === undefined ? truncationOf(pickResult(ran.text, ran.result)) : undefined
-      if (ran.deny === undefined && (ran.isError !== true || stood !== undefined)) {
+      const stood = ran.deny === undefined ? truncationOf(ran.text) ?? truncationOf(ran.result) : undefined
+      if (status === 'ran') {
         // Core relays the tool's text as `text` and its content blocks as `result`.
         // The latest IR names fields by their real names; which scalars show is decided when drawn.
         const current = await readCalls($)
@@ -1304,6 +1297,7 @@ export const register: Register = (on, options) => {
         // The site this response shows, before the rows' links are worked out from it.
         await learnSites($, ir, result)
         let outcome = outcomeOf(ir, result, linkConfig)
+        if (stood !== undefined && outcome.isUnreadable !== true) outcome = savedOutcome(outcome)
         if (outcome.isTooLarge === true && stood?.path !== undefined) {
           // Read the saved copy back: only a path Claude Code saved (src/result.ts), bounded.
           try {
@@ -1333,11 +1327,9 @@ export const register: Register = (on, options) => {
     return ran
   }).catch(($, e, next) => next(e))
 
-  // Trust rules: lifts the engine's ask to allow for an Agent Services call that fits the
-  // person's rules, and only that. A deny, an allow, an organization's
-  // ceiling, or anything the matcher refuses stands as the engine said; a
-  // throw here leaves the engine's verdict too.
-  on('tool.check', { tool: /^mcp__.+__execute$/ }, async ($, e, next) => {
+  // Trust rules may lift ask to allow. Preserve existing allow/deny decisions,
+  // organization ceilings, and the engine's verdict if matching fails.
+  on('tool.check', { tool: /^mcp__claude_ai_GraphOS_Agent_Services__execute$/ }, async ($, e, next) => {
     const verdict = await next(e)
     const id = e.tool_use_id
     // A query from a plugin (no call behind it) is answered as the engine would.
@@ -1387,7 +1379,7 @@ export const register: Register = (on, options) => {
   // its own ToolUse row, or folded into a ToolGroup's one line.
   // Only an `execute` row can be an Agent Services call's; an expanded group's rows are
   // ToolUse rows of their own, which carry the line, so the group does not.
-  on('ui.render', { component: 'ToolUse', props: { tool: /^mcp__.+__execute$/ } }, async ($, e, next) => {
+  on('ui.render', { component: 'ToolUse', props: { tool: /^mcp__claude_ai_GraphOS_Agent_Services__execute$/ } }, async ($, e, next) => {
     const drawn = await next(e)
     const texts = await verdictsOf($, [e.props])
     if (texts.length === 0) return drawn
@@ -1396,12 +1388,12 @@ export const register: Register = (on, options) => {
   })
   // A folded group draws no result of its own, so each call that has a RESULT
   // block (below) has it under its verdict line here, call by call.
-  on('ui.render', { component: 'ToolGroup', props: { isExpanded: false, calls: { tool: /^mcp__.+__execute$/ } } }, async ($, e, next) => {
+  on('ui.render', { component: 'ToolGroup', props: { isExpanded: false, calls: { tool: /^mcp__claude_ai_GraphOS_Agent_Services__execute$/ } } }, async ($, e, next) => {
     const drawn = await next(e)
     const entries: { texts: string[]; block: ResultBlock | undefined }[] = []
     for (const call of e.props.calls) {
       const texts = await verdictsOf($, [call])
-      const block = call.tool_use_id !== undefined && EXECUTE_TOOL.test(call.tool) && !call.isErrored ? await resultBlockOfRow($, call.tool, call.tool_use_id) : undefined
+      const block = call.tool_use_id !== undefined && EXECUTE_TOOL.test(call.tool) ? await resultBlockOfRow($, call.tool, call.tool_use_id) : undefined
       if (texts.length > 0 || block !== undefined) entries.push({ texts, block })
     }
     if (entries.length === 0) return drawn
@@ -1424,7 +1416,7 @@ export const register: Register = (on, options) => {
   // not docked and for scrollback. A standalone row's result is this event; an
   // expanded group draws each call's output inside its ToolUse row, which this
   // does not reach. Only a call that ran and whose response was read gets one.
-  on('ui.render', { component: 'ToolResult', props: { tool: /^mcp__.+__execute$/, isErrored: false } }, async ($, e, next) => {
+  on('ui.render', { component: 'ToolResult', props: { tool: /^mcp__claude_ai_GraphOS_Agent_Services__execute$/ } }, async ($, e, next) => {
     const drawn = await next(e)
     const block = await resultBlockOfRow($, e.props.tool, e.props.tool_use_id)
     if (block === undefined) return drawn

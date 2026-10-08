@@ -196,7 +196,7 @@ test('a value the call wrote never opens a piece of the line with ✓ or ⚑, so
 test('a check that failed says why in plain words, never the raw error', async () => {
   const { checkFailureWords } = await import('../../src/view/flags.ts')
   assert.equal(checkFailureWords("graphos-agent-mods: $.mcp.call(claude_ai_X, dry_run) refused: The user doesn't want to proceed with this tool use."), 'the call was stopped')
-  assert.equal(checkFailureWords('mcp__x__dry_run is not allowed without a prompt (ask)'), 'the read-only tools are not allowed (/gas setup)')
+  assert.equal(checkFailureWords('mcp__x__dry_run is not allowed without a prompt (ask)'), 'the read-only tools are not allowed')
   assert.equal(checkFailureWords('no answer from Agent Services in 20 s'), 'no answer in time')
   assert.equal(checkFailureWords('something odd'), undefined)
   assert.equal(checkFailureWords(undefined), undefined)

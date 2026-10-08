@@ -1,8 +1,6 @@
-// What the pane pins beside nodes, indexed by node. Pure: no $.
-//
-// Attention is the mod's own (src/attention.ts): a quiet marker before a field with
-// its short reason, dim like a note. Pins whose node is not on screen are
-// simply not drawn.
+// Field annotations indexed by schema coordinate. Pure: no $.
+// src/attention.ts computes the marker and reason. The view draws annotations
+// beside visible fields and omits annotations for hidden fields.
 
 import { PERSONAL_DATA, attentionOf } from '../attention.ts'
 import type { CallIR, CallOutcome } from '../ir.ts'

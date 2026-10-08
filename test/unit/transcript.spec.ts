@@ -9,7 +9,7 @@ import { normalize } from '../../src/normalize.ts'
 import { reviewCall } from '../../tests/review-fixtures.ts'
 
 // Link rules of the test's own: no shipped host is assumed.
-const { config: WIKI } = loadLinkConfig(undefined, {
+const { config: WIKI } = loadLinkConfig({
   shipped: `[bases]
 wiki = "https://wiki.example.com"
 
@@ -40,7 +40,7 @@ test('a call that ran says what came back and shows its first records, keys as l
 
 test('a record with no link says its key plainly', () => {
   const call = reviewCall('ran')
-  const block = resultBlockOf(call.outcome, call.ir, loadLinkConfig(undefined, { shipped: '' }).config)
+  const block = resultBlockOf(call.outcome, call.ir, loadLinkConfig({ shipped: '' }).config)
   assert.ok(block !== undefined)
   assert.ok(block.items.length > 0)
   for (const item of block.items) {

@@ -1,3 +1,4 @@
+import { URL } from 'node:url'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { describe, test } from 'node:test'
@@ -129,9 +130,48 @@ describe('fitCall: shape', () => {
     assert.match(misses('query Q { a: jira_searchIssues(jql: "project = DEV", maxResults: 5) { isLast } b: jira_searchIssues(jql: "project = OPS", maxResults: 5) { isLast } }'), /jql/)
   })
 
-  test('a field kept by an undecidable @include is fitted like any other', () => {
+  test('an undecidable @include cannot fit', () => {
     assert.match(misses('query Q($x: Boolean) { jira_searchIssues(jql: "project = DEV", maxResults: 5) { issues { secret @include(if: $x) } } }'), /secret|@include/)
   })
+})
+
+test('trust eligibility rejects ambiguous syntax even beneath an unrestricted field', () => {
+  const constrained = rules('query R { jira_search(limit: 5) { id } jira_issue jira_create_issue slack_send_message acme_customer_data_create_issue acme_customer_data_get_issue }')
+  for (const [operation, variables, expected] of [
+    ['{ jira_search(limit: 5, limit: 5000) { id } }', {}, false],
+    ['{ jira_search(limit: 5000, limit: 5) { id } }', {}, false],
+    ['{ jira_search(limit: 5, limit: 5) { id } }', {}, false],
+    ['{ jira_issue { comments(limit: 5, limit: 5000) { id } } }', {}, false],
+    ['{ jira_issue(filter: { project: "DEV", project: "OPS" }) }', {}, false],
+    ['{ jira_issue hidden: jira_issue(filter: { project: "DEV", project: "OPS" }) @skip(if: true) }', {}, false],
+    ['query Q($n: Int = 5, $n: Int = 5000) { jira_search(limit: $n) { id } }', {}, false],
+    ['query Q($x: Boolean) { jira_issue @include(if: $x) }', {}, false],
+    ['query Q($x: Boolean) { jira_issue { id @skip(if: $x) } }', {}, false],
+    ['query Q($x: Boolean) { ...F @include(if: $x) } fragment F on Query { jira_issue }', {}, false],
+    ['query Q($x: Boolean) { ... @skip(if: $x) { jira_issue } }', {}, false],
+    ['{ jira_issue @include(if: true, if: false) }', {}, false],
+    ['{ jira_issue @include(if: true, extra: false) }', {}, false],
+    ['{ jira_issue @skip }', {}, false],
+    ['{ jira_issue @include(if: "true") }', {}, false],
+    ['{ jira_issue @include(if: true) @include(if: false) }', {}, false],
+    ['query Q @skip(if: false) { jira_issue }', {}, false],
+    ['{ ...F } fragment F on Query @include(if: true) { jira_issue }', {}, false],
+    ['{ jira_issue { id @custom } }', {}, false],
+    ['{ jira_create_issue { id } }', {}, false],
+    ['{ slack_send_message { id } }', {}, false],
+    ['{ acme_customer_data_create_issue { id } }', {}, false],
+    ['{ acme_customer_data_get_issue { id } }', {}, true],
+    ['{ jira_search(limit: 5) { id } }', {}, true],
+    ['{ jira_issue { comments(limit: 5000) { id } } }', {}, true],
+    ['query Q($x: Boolean = true) { jira_issue @include(if: $x) }', {}, true],
+    ['query Q($x: Boolean!) { jira_issue @include(if: $x) }', { x: true }, true],
+    ['query Q($x: Boolean!) { ...F @include(if: $x) } fragment F on Query { jira_issue }', { x: true }, true],
+  ] as const) assert.equal(fitCall({ operation, variables }, constrained).isAllowed, expected)
+  for (const operation of [
+    'query R { jira_search(limit: 5, limit: 5000) }',
+    'query R { jira_issue { comments(first: 1, first: 5000) } }',
+    'query R { jira_issue(filter: { project: "DEV", project: "OPS" }) }',
+  ]) assert.equal(parseTrust(operation).rules.length, 0)
 })
 
 describe('fitCall: arguments', () => {

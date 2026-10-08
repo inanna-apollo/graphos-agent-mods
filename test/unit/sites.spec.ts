@@ -48,74 +48,71 @@ test("only a vendor's tenant host, from a URL field, under that vendor's root, c
   assert.deepEqual(sitesIn(jira, 'nope'), {})
 })
 
-test('a learned site fills only a base no file or option sets', () => {
+test('a learned site fills only a base no file sets', () => {
   const learned = { atlassian: 'https://yourco.atlassian.net', slack: 'https://yourco.slack.com' }
-  const plain = loadLinkConfig(undefined, { learned }).config
+  const plain = loadLinkConfig({ learned }).config
   assert.equal(recordLinkOf('jira', { key: 'AB-1' }, plain), 'https://yourco.atlassian.net/browse/AB-1')
-  const set = loadLinkConfig({ atlassianBase: 'https://mine.atlassian.net' }, { learned }).config
-  assert.equal(recordLinkOf('jira', { key: 'AB-1' }, set), 'https://mine.atlassian.net/browse/AB-1')
-  const filed = loadLinkConfig(undefined, { learned, user: '[bases]\natlassian = "https://filed.atlassian.net"\n' }).config
+  const filed = loadLinkConfig({ learned, user: '[bases]\natlassian = "https://filed.atlassian.net"\n' }).config
   assert.equal(recordLinkOf('jira', { key: 'AB-1' }, filed), 'https://filed.atlassian.net/browse/AB-1')
   // A base a file turned off ("") with no learned site stays off; a bad learned value is ignored.
-  assert.equal(recordLinkOf('jira', { key: 'AB-1' }, loadLinkConfig(undefined, { learned: { atlassian: 'javascript:x' } }).config), undefined)
+  assert.equal(recordLinkOf('jira', { key: 'AB-1' }, loadLinkConfig({ learned: { atlassian: 'javascript:x' } }).config), undefined)
 })
 
 // ---- Where each base comes from
 
-test('each named base says where its value comes from: option, your file, the shipped file, a learned site, or nowhere', () => {
+test('each named base says where its value comes from: your file, the shipped file, a learned site, or nowhere', () => {
   const learned = { atlassian: 'https://yourco.atlassian.net', slack: 'https://yourco.slack.com' }
   const user = '[bases]\nwiki = "https://wiki.example.com"\nglean = "https://glean.example.com"\n'
   // Nothing set: the shipped file names Glean; Atlassian and Slack are empty there.
-  const bare = loadLinkConfig(undefined)
+  const bare = loadLinkConfig()
   assert.equal(bare.baseSources.atlassian, 'unset')
   assert.equal(bare.baseSources.slack, 'unset')
   assert.equal(bare.baseSources.glean, 'shipped')
   assert.equal(bare.config.bases.atlassian, '')
   // A learned site fills an unset base and says so; the others keep their sources.
-  const taught = loadLinkConfig(undefined, { learned })
+  const taught = loadLinkConfig({ learned })
   assert.equal(taught.baseSources.atlassian, 'learned')
   assert.equal(taught.baseSources.slack, 'learned')
   assert.equal(taught.baseSources.glean, 'shipped')
   assert.equal(taught.config.bases.slack, 'https://yourco.slack.com')
-  // The person's file and the options come before a learned site, and say so.
-  const set = loadLinkConfig({ slackBase: 'https://mine.slack.com' }, { learned, user })
-  assert.equal(set.baseSources.slack, 'option')
+  // The person's file comes before a learned site, and says so.
+  const set = loadLinkConfig({ learned, user: user + 'slack = "https://mine.slack.com"\n' })
+  assert.equal(set.baseSources.slack, 'user')
   assert.equal(set.baseSources.glean, 'user')
   assert.equal(set.baseSources.wiki, 'user')
   assert.equal(set.config.bases.slack, 'https://mine.slack.com')
-  assert.equal(loadLinkConfig(undefined, { learned, user: '[bases]\natlassian = "https://filed.atlassian.net"\n' }).baseSources.atlassian, 'user')
-  // An option names a base over a file that names the same one.
-  assert.equal(loadLinkConfig({ atlassianBase: 'https://opt.atlassian.net' }, { user: '[bases]\natlassian = "https://filed.atlassian.net"\n' }).baseSources.atlassian, 'option')
+  assert.equal(loadLinkConfig({ learned, user: '[bases]\natlassian = "https://filed.atlassian.net"\n' }).baseSources.atlassian, 'user')
 })
 
 test('a base the person turned off in their own file stays off: no response teaches it', () => {
   const learned = { atlassian: 'https://yourco.atlassian.net', slack: 'https://yourco.slack.com' }
-  const { config, baseSources } = loadLinkConfig(undefined, { learned, user: '[bases]\natlassian = ""\n' })
+  const { config, baseSources } = loadLinkConfig({ learned, user: '[bases]\natlassian = ""\n' })
   assert.equal(baseSources.atlassian, 'off')
   assert.equal(config.bases.atlassian, '')
   assert.equal(recordLinkOf('jira', { key: 'AB-1' }, config), undefined)
   // The other site is still the person's to leave to learning.
   assert.equal(baseSources.slack, 'learned')
-  // An option set on top of an off base still wins, as it does over any file.
-  assert.equal(loadLinkConfig({ atlassianBase: 'https://opt.atlassian.net' }, { learned, user: '[bases]\natlassian = ""\n' }).baseSources.atlassian, 'option')
 })
 
 test('a learned value that is no site, or names a base nobody declares, fills nothing and changes no source', () => {
-  for (const bad of ['javascript:x', 'http://yourco.atlassian.net', 'https://u:p@yourco.atlassian.net', '', 42, null, undefined]) {
-    const { config, baseSources } = loadLinkConfig(undefined, { learned: { atlassian: bad as string } })
+  for (const bad of ['https://evil.example', 'https://yourco.slack.com', 'https://api.atlassian.net', 'https://yourco.atlassian.net:444', 'javascript:x', 'http://yourco.atlassian.net', 'https://u:p@yourco.atlassian.net', '', 42, null, undefined]) {
+    const { config, baseSources } = loadLinkConfig({ learned: { atlassian: bad as string } })
     assert.equal(config.bases.atlassian, '', String(bad))
     assert.equal(baseSources.atlassian, 'unset', String(bad))
   }
-  const { config, baseSources } = loadLinkConfig(undefined, { learned: { nosuch: 'https://yourco.atlassian.net', constructor: 'https://yourco.atlassian.net' } })
+  const { config, baseSources } = loadLinkConfig({ learned: { nosuch: 'https://yourco.atlassian.net', constructor: 'https://yourco.atlassian.net' } })
   assert.equal(Object.hasOwn(config.bases, 'nosuch'), false)
   assert.equal(Object.hasOwn(baseSources, 'nosuch'), false)
   assert.equal(Object.hasOwn(config.bases, 'constructor'), false)
+  const custom = loadLinkConfig({ shipped: '[bases]\nwiki = ""\n', learned: { wiki: 'https://wiki.example.com' } })
+  assert.equal(custom.config.bases.wiki, '')
+  assert.equal(custom.baseSources.wiki, 'unset')
 })
 
 test('learnable names only the bases a response can teach that nobody set', () => {
   assert.deepEqual(learnable({ atlassian: 'unset', slack: 'unset', glean: 'shipped' }), ['atlassian', 'slack'])
   assert.deepEqual(learnable({ atlassian: 'learned', slack: 'unset' }), ['slack'])
-  assert.deepEqual(learnable({ atlassian: 'option', slack: 'user' }), [])
+  assert.deepEqual(learnable({ atlassian: 'shipped', slack: 'user' }), [])
   assert.deepEqual(learnable({ atlassian: 'off', slack: 'off' }), [])
   // Another base left empty is not one a response can teach; nothing loaded teaches nothing.
   assert.deepEqual(learnable({ wiki: 'unset' }), [])
@@ -147,27 +144,26 @@ test('a Jira root named like an Object member never reaches Object, and a respon
 // ---- What /gas links and /gas setup say
 
 test('the sites report names every base with its source, and for an unset one how to set it', () => {
-  const { config, baseSources } = loadLinkConfig({ slackBase: 'https://mine.slack.com' }, { learned: { atlassian: 'https://yourco.atlassian.net' }, user: '[bases]\nwiki = "https://wiki.example.com"\nold = ""\n' })
+  const { config, baseSources } = loadLinkConfig({ learned: { atlassian: 'https://yourco.atlassian.net' }, user: '[bases]\nslack = "https://mine.slack.com"\nwiki = "https://wiki.example.com"\nold = ""\n' })
   const lines = describeBases(config.bases, baseSources, '/home/me/.claude/graphos-agent-mods/links.toml')
   const at = (name: string) => lines.find(line => line.trim().startsWith(name)) ?? ''
   assert.match(at('atlassian'), /https:\/\/yourco\.atlassian\.net.*learned from an Agent Services response.*\/gas links forget/)
-  assert.match(at('slack'), /https:\/\/mine\.slack\.com.*plugin option/)
+  assert.match(at('slack'), /https:\/\/mine\.slack\.com.*your links\.toml/)
   assert.match(at('glean'), /shipped default/)
   assert.match(at('wiki'), /from your links\.toml/)
   assert.match(at('old'), /turned off by your links\.toml/)
   // Unset: the file line to write, the file's path, and that a response can teach it.
-  const bare = loadLinkConfig(undefined)
+  const bare = loadLinkConfig()
   const slack = describeBases(bare.config.bases, bare.baseSources, '/home/me/.claude/graphos-agent-mods/links.toml').find(line => line.trim().startsWith('slack')) ?? ''
   assert.match(slack, /not set/)
-  assert.doesNotMatch(slack, /plugin option/)
   assert.match(slack, /slack = "https:\/\/yourco\.slack\.com" under \[bases\] in \/home\/me\/\.claude\/graphos-agent-mods\/links\.toml/)
   assert.match(slack, /Agent Services response.*teaches it/)
-  // A base nobody can teach has no such line; an unset base with no option has no option to name.
+  // A base nobody can teach has no such line.
   const wiki = describeBases({ wiki: '' }, { wiki: 'unset' }, undefined).join('\n')
-  assert.doesNotMatch(wiki, /plugin option|teaches it/)
+  assert.doesNotMatch(wiki, /teaches it/)
   assert.match(wiki, /in your links\.toml/)
   // A base named like an Object member is just a name.
-  const odd = describeBases({ constructor: '' }, { constructor: 'unset' }, undefined).join('\n')
+  const odd = describeBases({ constructor: '' }, { constructor: 'unset' as const }, undefined).join('\n')
   assert.doesNotMatch(odd, /function|native code/)
 })
 
@@ -200,7 +196,7 @@ test('a site is read only where the vendor writes it, never from what a person w
   assert.deepEqual(sitesIn(jira, { data: { jira_getIssue: { fields: { customfield_1: { iconUrl: 'https://evil.atlassian.net/i.png' } } } } }), {})
   // The site's own: a status's icon, a page's _links.base.
   assert.deepEqual(sitesIn(jira, { data: { jira_getIssue: { fields: { status: { iconUrl: 'https://yourco.atlassian.net/images/icons/statuses/open.png' } } } } }), { atlassian: 'https://yourco.atlassian.net' })
-  const page = ir('query P { confluence_page(id: "1") { id } }')
+  const page = ir('query P { confluence_page(id: "1") { _links { base } } }')
   assert.deepEqual(sitesIn(page, { data: { confluence_page: { _links: { base: 'https://yourco.atlassian.net/wiki' } } } }), { atlassian: 'https://yourco.atlassian.net' })
   // Slack: a link in a message's blocks or an attachment names any workspace; the message's permalink is Slack's.
   const slack = ir('query S { slack_searchMessages(query: "x") { messages } }')
@@ -209,4 +205,47 @@ test('a site is read only where the vendor writes it, never from what a person w
   assert.deepEqual(sitesIn(slack, { data: { slack_searchMessages: { messages: [{ ...message, permalink: 'https://yourco.slack.com/archives/C1/p1' }] } } }), { slack: 'https://yourco.slack.com' })
   // A `url` deep inside a Slack answer is not the auth test's own.
   assert.deepEqual(sitesIn(slack, { data: { slack_searchMessages: { messages: [{ user: { url: 'https://other-co.slack.com/' } }] } } }), {})
+})
+
+test('tenant learning resolves selected aliases and limits opaque JSON metadata', () => {
+  const good = 'https://yourco.atlassian.net/x'
+  const bad = 'https://wrong.atlassian.net/x'
+  for (const [operation, value, expected] of [
+    ['{ jira_issue { self: description } }', { self: bad }, {}],
+    ['{ jira_issue { self: summary } }', { self: bad }, {}],
+    ['{ jira_issue { self: description self } }', { self: bad }, {}],
+    ['{ jira_issue { source: self source: description } }', { source: bad }, {}],
+    ['{ jira_issue { source: self } }', { source: good }, { atlassian: 'https://yourco.atlassian.net' }],
+    ['{ jira_issue { description: self } }', { description: good }, { atlassian: 'https://yourco.atlassian.net' }],
+    ['{ jira_issue { source: description { status { iconUrl } } } }', { source: { status: { iconUrl: bad } } }, {}],
+    ['{ jira_issue { fields } }', { self: bad, fields: {} }, {}],
+    ['{ jira_issue { fields } }', { fields: { customfield_1: { self: bad, status: { iconUrl: bad } } } }, {}],
+    ['{ jira_issue { fields } }', { fields: { status: { self: bad } } }, { atlassian: 'https://wrong.atlassian.net' }],
+    ['{ jira_issue { fields } }', { fields: { priority: { iconUrl: good } } }, { atlassian: 'https://yourco.atlassian.net' }],
+    ['{ jira_issue { fields } }', { fields: { issuetype: { iconUrl: good } } }, { atlassian: 'https://yourco.atlassian.net' }],
+    ['{ jira_issue { meta: fields { state: status { icon: iconUrl } } } }', { meta: { state: { icon: good } } }, { atlassian: 'https://yourco.atlassian.net' }],
+    ['{ jira_issue { fields } }', { fields: { description: { self: bad }, comment: { self: bad }, arbitrary: { _links: { base: bad } } } }, {}],
+  ] as const) {
+    assert.deepEqual(sitesIn(ir(operation), { data: { jira_issue: value } }), expected)
+  }
+  assert.deepEqual(sitesIn(ir('{ hit: jira_issue { self } hit: glean_search { self } }'), { data: { hit: { self: bad } } }), {})
+  for (const [operation, value, expected] of [
+    ['{ confluence_page { self: body } }', { self: bad }, {}],
+    ['{ confluence_page { meta: _links { site: base } } }', { meta: { site: good } }, { atlassian: 'https://yourco.atlassian.net' }],
+    ['{ confluence_page { _links } }', { _links: { base: good } }, { atlassian: 'https://yourco.atlassian.net' }],
+    ['{ confluence_page { payload } }', { payload: { self: bad, _links: { base: bad } } }, {}],
+  ] as const) {
+    assert.deepEqual(sitesIn(ir(operation), { data: { confluence_page: value } }), expected)
+  }
+  for (const [operation, root, value, expected] of [
+    ['{ slack_authTest { source: url } }', 'slack_authTest', { source: 'https://yourco.slack.com/' }, { slack: 'https://yourco.slack.com' }],
+    ['{ slack_authTest { url: text } }', 'slack_authTest', { url: 'https://wrong.slack.com/' }, {}],
+    ['{ slack_searchMessages { messages } }', 'slack_searchMessages', { messages: { matches: [{ permalink: 'https://yourco.slack.com/x' }] } }, { slack: 'https://yourco.slack.com' }],
+    ['{ slack_searchMessages { messages } }', 'slack_searchMessages', { messages: [{ metadata: { permalink: 'https://wrong.slack.com/x' }, attachments: [{ permalink: 'https://wrong.slack.com/x' }] }] }, {}],
+    ['{ slack_searchMessages { messages { permalink: text } } }', 'slack_searchMessages', { messages: [{ permalink: 'https://wrong.slack.com/x' }] }, {}],
+    ['{ slack_searchMessages { messages { source: permalink } } }', 'slack_searchMessages', { messages: [{ source: 'https://yourco.slack.com/x' }] }, { slack: 'https://yourco.slack.com' }],
+    ['{ slack_searchMessages { url } }', 'slack_searchMessages', { url: 'https://wrong.slack.com/' }, {}],
+  ] as const) {
+    assert.deepEqual(sitesIn(ir(operation), { data: { [root]: value } }), expected)
+  }
 })

@@ -20,20 +20,42 @@ import { subOperation, unique } from './split.ts'
 export type GasTool = 'search' | 'introspect' | 'validate' | 'dry_run'
 export type CallGas = (tool: GasTool, args: Record<string, unknown>) => Promise<McpToolResult>
 
+/** An enrichment read must need no dialog and fit the organization's ceiling. */
+export function isAllowedWithoutPrompt(verdict: { decision: string; ceiling?: string }): boolean {
+  return verdict.decision === 'allow' && (verdict.ceiling === undefined || verdict.ceiling === 'allow')
+}
+
 /**
  * What enrichment remembers between calls. Everything in it is valid for one
  * bundleDigest: a result carrying another digest clears it (schema or policy moved).
  */
 export type EnrichCache = {
+  generation: number
   bundleDigest?: string
   scopes?: string[]
-  /** `scope\nrootField` → SDL of the root field's `type Query { … }` snippet. */
+  /** `scope\noperationType\nrootField` → SDL of the root field's signature. */
   roots: Map<string, string[]>
   /** `scope\ntype\ndepth` → SDL strings. */
   types: Map<string, string[]>
 }
 
-export const emptyCache = (): EnrichCache => ({ roots: new Map(), types: new Map() })
+export const emptyCache = (): EnrichCache => ({ generation: 0, roots: new Map(), types: new Map() })
+
+/** Schema and scope facts belong to the server that answered them. */
+export function cacheForServer(caches: Map<string, EnrichCache>, server: string): EnrichCache {
+  let cache = caches.get(server)
+  if (cache === undefined) {
+    cache = emptyCache()
+    caches.set(server, cache)
+  }
+  return cache
+}
+
+class GenerationChanged extends Error {
+  constructor() {
+    super('Agent Services bundle changed during analysis')
+  }
+}
 
 function noteDigest(cache: EnrichCache, digest: string | undefined): void {
   if (digest === undefined || digest === cache.bundleDigest) return
@@ -41,20 +63,27 @@ function noteDigest(cache: EnrichCache, digest: string | undefined): void {
     cache.scopes = undefined
     cache.roots.clear()
     cache.types.clear()
+    cache.generation += 1
   }
   cache.bundleDigest = digest
 }
 
 async function read(call: CallGas, cache: EnrichCache, tool: GasTool, args: Record<string, unknown>) {
+  const generation = cache.generation
   const payload = payloadOf(await call(tool, args))
   if (!payload.ok) throw new Error(`${tool}: ${payload.error}`)
+  // An old request must neither roll the digest back nor repopulate a new cache.
+  if (cache.generation !== generation) throw new GenerationChanged()
   noteDigest(cache, payload.bundleDigest)
+  if (cache.generation !== generation) throw new GenerationChanged()
   return payload.value
 }
 
 export async function scopesOf(call: CallGas, cache: EnrichCache): Promise<string[]> {
   if (cache.scopes !== undefined) return cache.scopes
+  const generation = cache.generation
   const value = await read(call, cache, 'search', { terms: [] })
+  if (cache.generation !== generation) throw new GenerationChanged()
   const scopes = Array.isArray(value.scopes) ? value.scopes.filter((one): one is string => typeof one === 'string') : []
   cache.scopes = scopes
   return scopes
@@ -62,14 +91,16 @@ export async function scopesOf(call: CallGas, cache: EnrichCache): Promise<strin
 
 /** The root field's signature: search finds `type Query { field(…): T }` with its description. */
 async function rootSdl(call: CallGas, cache: EnrichCache, scope: string, field: string, opType: string): Promise<string[]> {
-  const key = `${scope}\n${field}`
+  const key = `${scope}\n${opType}\n${field}`
   const cached = cache.roots.get(key)
   if (cached !== undefined) return cached
+  const generation = cache.generation
   const value = await read(call, cache, 'search', {
     terms: [field],
     scope,
     ...(opType === 'subscription' ? {} : { operationType: opType }),
   })
+  if (cache.generation !== generation) throw new GenerationChanged()
   const results = Array.isArray(value.results) ? value.results : []
   const hit = results.find(
     (one): one is { operationName: string; types: unknown[] } =>
@@ -84,7 +115,9 @@ async function typeSdl(call: CallGas, cache: EnrichCache, scope: string, type: s
   const key = `${scope}\n${type}\n${depth}`
   const cached = cache.types.get(key)
   if (cached !== undefined) return cached
+  const generation = cache.generation
   const sdl = sdlOf(await read(call, cache, 'introspect', { scope, type, depth }))
+  if (cache.generation !== generation) throw new GenerationChanged()
   cache.types.set(key, sdl)
   return sdl
 }
@@ -166,7 +199,8 @@ async function checkScope(
  * IR. A root no scope claims keeps its facts unknown. Resolves once every
  * source has answered or failed; never rejects.
  */
-export async function enrich(call: CallGas, cache: EnrichCache, ir: CallIR, operation: string, variables: Record<string, unknown> = {}): Promise<CallIR> {
+async function enrichGeneration(call: CallGas, cache: EnrichCache, ir: CallIR, operation: string, variables: Record<string, unknown>): Promise<CallIR> {
+  const generation = cache.generation
   if (ir.state === 'unparseable') return ir
   // Nothing to look up; never leave a call `analyzing`, or the pump retries it forever.
   if (ir.roots.length === 0 || ir.opType === undefined) return { ...ir, state: 'partial' }
@@ -182,6 +216,7 @@ export async function enrich(call: CallGas, cache: EnrichCache, ir: CallIR, oper
     for (const key of CHECKS) lookup[key] = outcome
     if (!isNotAllowed) lookup.error = String(error instanceof Error ? error.message : error).slice(0, 160)
   }
+  if (cache.generation !== generation) throw new GenerationChanged()
   const digest = cache.bundleDigest === undefined ? {} : { bundleDigest: cache.bundleDigest }
   if (scopes === undefined) return annotate(ir, { isIncomplete: true, checks: lookup, ...digest })
 
@@ -203,6 +238,7 @@ export async function enrich(call: CallGas, cache: EnrichCache, ir: CallIR, oper
       return checkScope(call, cache, opType, scope, roots, sub, index)
     }),
   )
+  if (cache.generation !== generation) throw new GenerationChanged()
 
   const checks: Checks = { policy: 'ok', validation: 'ok', schema: 'ok' }
   for (const result of results) {
@@ -244,4 +280,19 @@ export async function enrich(call: CallGas, cache: EnrichCache, ir: CallIR, oper
     ...(results.some(result => result.isSchemaRead) && { schema: index }),
   }
   return annotate(ir, found)
+}
+
+/** Retry a moving bundle once; never present facts combined across generations. */
+export async function enrich(call: CallGas, cache: EnrichCache, ir: CallIR, operation: string, variables: Record<string, unknown> = {}): Promise<CallIR> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      return await enrichGeneration(call, cache, ir, operation, variables)
+    } catch (error) {
+      if (!(error instanceof GenerationChanged)) throw error
+    }
+  }
+  return annotate(ir, {
+    isIncomplete: true,
+    checks: { policy: 'failed', validation: 'failed', schema: 'failed', error: 'Agent Services bundle changed during analysis' },
+  })
 }

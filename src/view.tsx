@@ -68,7 +68,7 @@ export type ViewOptions = {
   scrollOffset?: number
   /** Where the pane stands in its history (src/queue.ts navOf); absent with one call or none. */
   nav?: Nav
-  /** Deep-link bases and extra templates (src/links.ts configOf of the plugin's options). */
+  /** Link mappings from links.toml and learned vendor sites. */
   links?: LinkConfig
   /** Calls waiting at their prompts (`1 of N` in the header); viewOf passes its own. */
   waiting?: number
@@ -339,7 +339,7 @@ function PreviewRows({ ctx, line }: { ctx: Ctx; line: Extract<ResultLine, { kind
                   {drawn.text !== undefined && <Text>{drawn.text}</Text>}
                   {item.extra !== undefined && <Text {...struct(STRUCT.date)}>{`${item.text === undefined ? '' : '  '}${item.extra}`}</Text>}
                   {pad > 0 && ' '.repeat(pad)}
-                  {/* Denied on the row that owns it: the mark red, the name quiet, so the summary box stays the loudest thing. */}
+                  {/* Show the denied field on its record row, with a red marker and a subdued name. */}
                   {(item.denied ?? []).map((one, at) => (
                     <Text>
                       {lead !== '' || pad > 0 || at > 0 ? '  ' : ''}
@@ -395,7 +395,7 @@ function RowToggle({ ctx, item, rowAt, isOpen, isCut, hover }: { ctx: Ctx; item:
  */
 function OpenedRow({ ctx, item }: { ctx: Ctx; item: Extract<ResultLine, { kind: 'preview' }>['items'][number] }) {
   const { Box, Text } = ctx.kit
-  const config = ctx.links ?? configOf(undefined)
+  const config = ctx.links ?? configOf()
   const width = Math.max(1, ctx.columns - OPENED_INDENT)
   const names = fieldNameColumn(item, width)
   return (
@@ -717,7 +717,7 @@ function Empty({ kit, bodyRows }: { kit: Kit; bodyRows: number | undefined }) {
  */
 export function planFor(kit: Kit, call: InspectedCall, columns: number, ui: PaneUi = CLOSED, act?: Act, options: ViewOptions = {}): Plan {
   const isPending = call.status === 'pending'
-  const config = options.links ?? configOf(undefined)
+  const config = options.links ?? configOf()
   const status = statusOf(call.status, options.waiting ?? 0, call.outcome)
   return planOf(call.ir, {
     status: status === undefined ? '' : `${status.glyph === '' ? '' : `${status.glyph} `}${status.word}`,

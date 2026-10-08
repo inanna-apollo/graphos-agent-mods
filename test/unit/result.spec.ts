@@ -393,7 +393,7 @@ test('a text cut for length is cut between characters, never inside an emoji', (
 
 // ---- Message-like records and long links
 
-const CHAT = loadLinkConfig(undefined, { shipped: '[bases]\nchat = "https://acme.chat.example"\n' }).config
+const CHAT = loadLinkConfig({ shipped: '[bases]\nchat = "https://acme.chat.example"\n' }).config
 
 test('a message is keyed by its short author, its words are the row\'s text, and its permalink opens from the key', () => {
   const ir = buildIR('s', normalize('query S { slack_searchMessages(query: "q") { messages { matches { ts text username permalink } } } }', {}))

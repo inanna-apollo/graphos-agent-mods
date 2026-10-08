@@ -57,7 +57,7 @@ export function withRecordLinks(
   arg: { name: string; value: unknown },
   renderer: string | undefined,
   rootField: string,
-  config: LinkConfig = configOf(undefined),
+  config: LinkConfig = configOf(),
 ): Rendered {
   if (renderer === 'jql') {
     if (rendered.isFallback) return rendered

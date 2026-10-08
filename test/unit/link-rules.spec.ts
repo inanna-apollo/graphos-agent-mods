@@ -1,3 +1,4 @@
+import { URL } from 'node:url'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
@@ -11,7 +12,7 @@ import { LINKS, SITE } from './link-fixture.ts'
 
 test('the embedded defaults are exactly links.toml', () => {
   assert.equal(DEFAULT_LINKS_TOML, readFileSync(new URL('../../links.toml', import.meta.url), 'utf8'))
-  assert.deepEqual(loadLinkConfig(undefined).problems, [])
+  assert.deepEqual(loadLinkConfig().problems, [])
 })
 
 const USER = `
@@ -39,12 +40,12 @@ arg = "q"
 url = "{wiki}/s?q={value}"
 `
 
-test('a user file adds rules ahead of the defaults and replaces bases; userConfig wins over both', () => {
-  const { config, problems } = loadLinkConfig(undefined, { user: USER })
+test('a user file adds rules ahead of the defaults and replaces bases', () => {
+  const { config, problems } = loadLinkConfig({ user: USER })
   assert.deepEqual(problems, [])
   assert.equal(config.bases.atlassian, 'https://example.atlassian.net')
   assert.equal(config.bases.glean, 'https://app.glean.com')
-  assert.equal(config.records.length, configOf(undefined).records.length + 2)
+  assert.equal(config.records.length, configOf().records.length + 2)
   // custom entry, matched on a dotted field
   assert.equal(recordLinkOf('x', { 'fields.ticket': 'T42' }, config), 'https://wiki.example.com/t/T42')
   assert.equal(recordLinkOf('x', { fields: { ticket: 'T42' } }, config), 'https://wiki.example.com/t/T42')
@@ -56,8 +57,6 @@ test('a user file adds rules ahead of the defaults and replaces bases; userConfi
   // a user search link
   const ir: CallIR = { toolCallId: 't', state: 'ready', roots: [{ name: 'x_find', coordinate: 'x', path: 'x', args: [{ name: 'q', value: 'a b', fromVariable: false }], policy: 'unknown', children: [] }] }
   assert.deepEqual(linksOf(ir, config), [{ label: 'Wiki search', url: 'https://wiki.example.com/s?q=a%20b' }])
-  const over = loadLinkConfig({ atlassianBase: 'https://opt.atlassian.net' }, { user: USER }).config
-  assert.equal(over.bases.atlassian, 'https://opt.atlassian.net')
 })
 
 test('the shipped rules link Jira keys and Confluence ids once a site is set, and nothing before', () => {
@@ -66,7 +65,7 @@ test('the shipped rules link Jira keys and Confluence ids once a site is set, an
   assert.equal(recordLinkOf('confluence', { id: 123 }, LINKS), `${SITE}/wiki/pages/viewpage.action?pageId=123`)
   assert.equal(recordLinkOf('confluence', { id: '12/../3' }, LINKS), undefined)
   // The shipped file names no site: each person's is their own.
-  assert.equal(recordLinkOf('jira', { key: 'DEV-634' }, configOf(undefined)), undefined)
+  assert.equal(recordLinkOf('jira', { key: 'DEV-634' }, configOf()), undefined)
 })
 
 test('bad entries and bad files are skipped, never thrown', () => {
@@ -103,19 +102,19 @@ service = "x"
 root = "x_*"
 url = "{atlassian}/{value}"
 `
-  const { config, problems } = loadLinkConfig(undefined, { user })
+  const { config, problems } = loadLinkConfig({ user })
   assert.ok(problems.length >= 7, problems.join('|'))
-  assert.equal(config.records.length, configOf(undefined).records.length)
-  assert.equal(config.searches.length, configOf(undefined).searches.length)
+  assert.equal(config.records.length, configOf().records.length)
+  assert.equal(config.searches.length, configOf().searches.length)
   assert.equal(config.bases.evil, undefined)
-  const broken = loadLinkConfig(undefined, { user: 'this is = = not toml' })
+  const broken = loadLinkConfig({ user: 'this is = = not toml' })
   assert.equal(broken.problems.length, 1)
-  assert.equal(broken.config.records.length, configOf(undefined).records.length)
-  assert.doesNotThrow(() => loadLinkConfig(null, { shipped: '[[[', user: '\u0000' }))
+  assert.equal(broken.config.records.length, configOf().records.length)
+  assert.doesNotThrow(() => loadLinkConfig({ shipped: '[[[', user: '\u0000' }))
 })
 
 test('a rule can never produce a foreign host; the value is percent-encoded', () => {
-  const { config } = loadLinkConfig({ atlassianBase: SITE }, { user: '[[record]]\nservice = "*"\nfield = "id"\nurl = "{atlassian}/go/{value}"\n' })
+  const { config } = loadLinkConfig({ user: `[bases]\natlassian = "${SITE}"\n[[record]]\nservice = "*"\nfield = "id"\nurl = "{atlassian}/go/{value}"\n` })
   const url = recordLinkOf('any', { id: 'https://evil.example/x?y=1#z' }, config)
   assert.equal(new URL(url!).host, new URL(SITE).host)
   assert.ok(!url!.includes('://evil'))
@@ -129,10 +128,10 @@ test('previewLinkOf: raw fields, old outcomes from label and fields, stored url 
   assert.equal(previewLinkOf('jira', { label: 'DEV-634' }, LINKS), `${SITE}/browse/DEV-634`)
   assert.equal(previewLinkOf('jira', { label: 'summary text', fields: [{ name: 'fields.key', value: 'DEV-9' }] }, LINKS), `${SITE}/browse/DEV-9`)
   // a config change applies to an old outcome
-  assert.equal(previewLinkOf('jira', { label: 'DEV-1' }, configOf({ atlassianBase: 'https://other.atlassian.net' })), 'https://other.atlassian.net/browse/DEV-1')
+  assert.equal(previewLinkOf('jira', { label: 'DEV-1' }, configOf({ user: '[bases]\natlassian = "https://other.atlassian.net"\n' })), 'https://other.atlassian.net/browse/DEV-1')
   // item.url fallback
-  assert.equal(previewLinkOf('glean', { label: 'doc', url: 'https://app.glean.com/doc/1' }, configOf({ gleanBase: 'https://app.glean.com' })), 'https://app.glean.com/doc/1')
-  assert.equal(previewLinkOf('glean', { label: 'doc', url: `${SITE}/browse/OLD-1` }, configOf({ atlassianBase: 'https://other.atlassian.net' })), undefined)
+  assert.equal(previewLinkOf('glean', { label: 'doc', url: 'https://app.glean.com/doc/1' }, configOf({ user: '[bases]\nglean = "https://app.glean.com"\n' })), 'https://app.glean.com/doc/1')
+  assert.equal(previewLinkOf('glean', { label: 'doc', url: `${SITE}/browse/OLD-1` }, configOf({ user: '[bases]\natlassian = "https://other.atlassian.net"\n' })), undefined)
   assert.equal(previewLinkOf('glean', { label: 'doc', url: 'https://evil.example/x' }, LINKS), undefined)
 })
 
@@ -146,7 +145,7 @@ test('openArgv: `open` on macOS, xdg-open on Linux, nothing elsewhere; only conf
     assert.ok('refused' in openArgv(bad, config, 'Darwin'), String(bad))
   }
   // a configured custom host is allowed, an unconfigured one is not
-  const { config: custom } = loadLinkConfig(undefined, { user: '[bases]\nwiki = "https://wiki.example.com"\n' })
+  const { config: custom } = loadLinkConfig({ user: '[bases]\nwiki = "https://wiki.example.com"\n' })
   assert.ok('argv' in openArgv('https://wiki.example.com/p/1', custom, 'Darwin'))
   assert.ok('refused' in openArgv('https://wiki.example.com/p/1', LINKS, 'Darwin'))
 })
@@ -154,8 +153,8 @@ test('openArgv: `open` on macOS, xdg-open on Linux, nothing elsewhere; only conf
 
 test("Agent Services' own auth link opens because the pane drew it; the same host otherwise does not", () => {
   const auth = 'https://gas.example.com/auth/confluence/link'
-  assert.deepEqual(openArgv(auth, configOf(undefined), 'Darwin', [auth]), { argv: ['open', auth] })
-  assert.ok('refused' in openArgv(auth, configOf(undefined), 'Darwin'))
-  assert.ok('refused' in openArgv('https://gas.example.com/elsewhere', configOf(undefined), 'Darwin', [auth]))
-  assert.ok('refused' in openArgv('http://x.test/a', configOf(undefined), 'Darwin', ['http://x.test/a']))
+  assert.deepEqual(openArgv(auth, configOf(), 'Darwin', [auth]), { argv: ['open', auth] })
+  assert.ok('refused' in openArgv(auth, configOf(), 'Darwin'))
+  assert.ok('refused' in openArgv('https://gas.example.com/elsewhere', configOf(), 'Darwin', [auth]))
+  assert.ok('refused' in openArgv('http://x.test/a', configOf(), 'Darwin', ['http://x.test/a']))
 })

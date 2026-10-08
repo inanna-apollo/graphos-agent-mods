@@ -35,7 +35,7 @@ export const MAX_ITEMS = 3
  * a response with no rows or values). Errors, denials and auth links are the
  * verdict line's and the pane's, not this block's.
  */
-export function resultBlockOf(outcome: CallOutcome | undefined, ir: CallIR, links: LinkConfig = configOf(undefined)): ResultBlock | undefined {
+export function resultBlockOf(outcome: CallOutcome | undefined, ir: CallIR, links: LinkConfig = configOf()): ResultBlock | undefined {
   if (outcome === undefined || outcome.isUnreadable === true || outcome.isTooLarge === true) return undefined
   const lines = resultLines(outcome, ir, links)
   // A write's confirmation leads: what came back of what it set.

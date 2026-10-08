@@ -2,8 +2,9 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
 import { buildIR } from '../../src/build.ts'
-import { emptyCache, enrich } from '../../src/enrich.ts'
-import type { CallGas, GasTool } from '../../src/enrich.ts'
+import { cacheForServer, emptyCache, enrich, isAllowedWithoutPrompt } from '../../src/enrich.ts'
+import type { CallGas, EnrichCache, GasTool } from '../../src/enrich.ts'
+import { payloadOf } from '../../src/gas.ts'
 import { normalize } from '../../src/normalize.ts'
 import type { FieldIR } from '../../src/ir.ts'
 
@@ -11,6 +12,24 @@ const OP = `query SearchQueryPlanPages($cql: String!, $limit: Int) { confluence_
 const VARS = { cql: 'type=page AND text ~ "query plan"', limit: 10 }
 
 const mcp = (payload: unknown, isError = false) => ({ content: [{ type: 'text' as const, text: JSON.stringify(payload) }], isError })
+const withDigest = (answer: Awaited<ReturnType<CallGas>>, digest: string) => {
+  const payload = payloadOf(answer)
+  assert.ok(payload.ok)
+  return mcp({ ...payload.value, bundleDigest: digest })
+}
+
+test('enrichment only accepts allow within an absent or allow organization ceiling', () => {
+  const cases = [
+    ['allow', [true, true, false, false]],
+    ['ask', [false, false, false, false]],
+    ['deny', [false, false, false, false]],
+  ] as const
+  for (const [decision, expected] of cases) {
+    for (const [i, ceiling] of [undefined, 'allow', 'ask', 'deny'].entries()) {
+      assert.equal(isAllowedWithoutPrompt({ decision, ceiling }), expected[i], `${decision} under ${ceiling ?? 'no ceiling'}`)
+    }
+  }
+})
 
 const SEARCH_ALL = { bundleDigest: 'd1', scopes: ['acme-customer-data', 'confluence', 'glean', 'jira', 'slack'], results: [] }
 const SEARCH_ONE = {
@@ -127,15 +146,119 @@ test('the cache: a second enrich of the same op makes no new search/introspect c
 
 test('a different bundleDigest clears the cache', async () => {
   let digest = 'd1'
-  const f = fake({ validate: () => mcp({ ...VALID, bundleDigest: digest }) })
+  const f = fake()
+  const call: CallGas = async (tool, args) => {
+    const answer = await f.call(tool, args)
+    return withDigest(answer, digest)
+  }
   const cache = emptyCache()
-  await enrich(f.call, cache, build(), OP)
+  await enrich(call, cache, build(), OP)
   digest = 'd2'
-  await enrich(f.call, cache, build(), OP) // validate answers d2: cache cleared
   const searches = f.count('search')
-  const third = await enrich(f.call, cache, build(), OP)
-  assert.ok(f.count('search') > searches, 'searched again after the digest moved')
-  assert.equal(third.state, 'ready')
+  const changed = await enrich(call, cache, build(), OP)
+  assert.ok(f.count('search') > searches, 'the same analysis refetches after the digest moves')
+  assert.equal(changed.state, 'ready')
+  assert.equal(changed.bundleDigest, 'd2')
+})
+
+test('different servers discover their own scopes and schema', async () => {
+  const caches = new Map<string, EnrichCache>()
+  await enrich(fake().call, cacheForServer(caches, 'first'), build(), OP)
+  let searches = 0
+  const call: CallGas = async (tool, args) => {
+    if (tool === 'search') {
+      searches++
+      return mcp((args.terms as string[]).length === 0
+        ? { bundleDigest: 'other', scopes: ['slack'] }
+        : { bundleDigest: 'other', results: [{ operationName: 'slack_read', types: ['type Query { slack_read: Int }'] }] })
+    }
+    return mcp(tool === 'validate' ? { bundleDigest: 'other', valid: true } : { bundleDigest: 'other', results: [{ fields: [{ path: 'slack_read', decision: 'allow' }] }] })
+  }
+  const op = '{ slack_read }'
+  const second = await enrich(call, cacheForServer(caches, 'second'), build(op, {}), op)
+  assert.equal(searches, 2)
+  assert.equal(second.bundleDigest, 'other')
+  assert.equal(second.roots[0]!.schema!.type, 'Int')
+  assert.equal(second.roots[0]!.policy, 'allow')
+})
+
+test('a bundle change refetches a cached signature before reporting ready', async () => {
+  let digest = 'old'
+  const call: CallGas = async (tool, args) => {
+    if (tool === 'search') return mcp((args.terms as string[]).length === 0
+      ? { bundleDigest: digest, scopes: ['jira'] }
+      : { bundleDigest: digest, results: [{ operationName: 'jira_read', types: [`type Query { jira_read: ${digest === 'old' ? 'String' : 'Int'} }`] }] })
+    return mcp(tool === 'validate' ? { bundleDigest: digest, valid: true } : { bundleDigest: digest, results: [{ fields: [{ path: 'jira_read', decision: 'allow' }] }] })
+  }
+  const cache = emptyCache()
+  const op = '{ jira_read }'
+  await enrich(call, cache, build(op, {}), op)
+  digest = 'new'
+  const changed = await enrich(call, cache, build(op, {}), op)
+  assert.equal(changed.state, 'ready')
+  assert.equal(changed.bundleDigest, 'new')
+  assert.equal(changed.roots[0]!.schema!.type, 'Int')
+})
+
+test('query and mutation roots with the same name retain their own signatures', async () => {
+  const f = fake({ search: args => (args.terms as string[]).length === 0 ? mcp(SEARCH_ALL) : mcp({
+    bundleDigest: 'd1',
+    results: [{ operationName: 'confluence_same', types: [args.operationType === 'query' ? 'type Query { confluence_same: String }' : 'type Mutation { confluence_same: Int }'] }],
+  }) })
+  const cache = emptyCache()
+  const query = 'query { confluence_same }'
+  const mutation = 'mutation { confluence_same }'
+  await enrich(f.call, cache, build(query, {}), query)
+  const changed = await enrich(f.call, cache, build(mutation, {}), mutation)
+  assert.equal(changed.roots[0]!.schema!.type, 'Int')
+})
+
+test('a repeatedly changing bundle stops after one retry and leaves facts unknown', async () => {
+  let digest = 0
+  let scopeReads = 0
+  const call: CallGas = async (tool, args) => {
+    if (tool === 'search' && (args.terms as string[]).length === 0) scopeReads++
+    return mcp({ bundleDigest: `d${++digest}`, scopes: ['confluence'], valid: true, results: [{ fields: [{ path: 'confluence_search', decision: 'allow' }] }] })
+  }
+  const ir = await enrich(call, emptyCache(), build(), OP)
+  assert.equal(scopeReads, 2)
+  assert.equal(ir.state, 'partial')
+  assert.equal(ir.bundleDigest, undefined)
+  assert.equal(ir.validation, undefined)
+  assert.equal(ir.roots[0]!.schema, undefined)
+  assert.equal(ir.roots[0]!.policy, 'unknown')
+  assert.match(ir.checks!.error!, /bundle changed/)
+})
+
+test('a late response from an older generation cannot roll the cache back', async () => {
+  const cache = emptyCache()
+  let release!: () => void
+  const held = new Promise<void>(resolve => release = resolve)
+  let requested!: () => void
+  const started = new Promise<void>(resolve => requested = resolve)
+  let reads = 0
+  const old: CallGas = async (tool, args) => {
+    if (tool === 'search' && (args.terms as string[]).length === 0) {
+      if (++reads === 1) { requested(); await held; return mcp({ bundleDigest: 'old', scopes: ['confluence'] }) }
+      return mcp({ bundleDigest: 'new', scopes: ['confluence'] })
+    }
+    const response = await fake().call(tool, args)
+    return withDigest(response, 'new')
+  }
+  // Establish a generation, then leave another scope lookup in flight.
+  cache.bundleDigest = 'initial'
+  const waiting = enrich(old, cache, build(), OP)
+  await started
+  const current: CallGas = async (tool, args) => {
+    const response = await fake().call(tool, args)
+    return withDigest(response, 'new')
+  }
+  await enrich(current, cache, build(), OP)
+  release()
+  const result = await waiting
+  assert.equal(cache.bundleDigest, 'new')
+  assert.equal(result.bundleDigest, 'new')
+  assert.equal(result.state, 'ready')
 })
 
 test('a rejecting dry_run gives partial with unknown policy and does not reject', async () => {

@@ -92,6 +92,16 @@ test('full content blocks beat a stand-in error text', () => {
   assert.equal(pickResult('{"data":{}}', blocks), '{"data":{}}')
 })
 
+test('a response quoting a saved-output notice remains ordinary response content', () => {
+  const text = JSON.stringify({ data: { incidents: [{ ref: 'a', name: REPLACEMENT.replace('\n', ' ') }] } })
+  const blocks = [{ type: 'text', text }]
+  for (const response of [text, blocks, JSON.stringify(blocks)]) {
+    assert.equal(truncationOf(response), undefined)
+    assert.equal(outcomeOf(ir, response).rows[0]?.count, 1)
+  }
+  assert.equal(pickResult(text, undefined), text)
+})
+
 test('more rows than the limit argument is flagged in the warning tone', () => {
   const rows = resultLines(outcomeOf(ir, fixture), ir).find(line => line.kind === 'rows')
   // The number takes the warning tone; the flags line says what was asked.

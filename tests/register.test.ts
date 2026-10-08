@@ -249,6 +249,13 @@ const SDL = {
 test('roots across services get policy per root, every service in the header, and a summary', async ($, on) => {
   const clock = mock.clock(on)
   const scopesChecked = new Set<string>()
+  let summaryReady!: () => void
+  const isSummaryReady = new Promise<void>(resolve => (summaryReady = resolve))
+  on('state.set', { plugin: 'graphos-agent-mods', key: 'calls' }, async (_, e, next) => {
+    const answer = await next(e)
+    if (answer.value?.isSet && [...e.value.queue, ...e.value.history].some(call => call.ir.summary !== undefined)) summaryReady()
+    return answer
+  })
   on('tool.list', () => ({ value: GAS_TOOLS }))
   on('tool.check', () => ({ decision: 'allow' as const }))
   on('mcp.call', (_, e) => {
@@ -276,6 +283,8 @@ test('roots across services get policy per root, every service in the header, an
 
   await $.tool.call({ tool: EXECUTE, operation: GNARLY, variables: JSON.stringify({ jql: 'project = A' }) })
   await clock.advance(1_000)
+  // WebCrypto and worker replies can finish after the mock clock's advance.
+  await isSummaryReady
 
   expect([...scopesChecked].sort()).toEqual(['acme-customer-data', 'jira'])
   const pane = await $.ui.mount({ plugin: 'graphos-agent-mods', surface: 'terminal', component: 'Pane', requestId: 'gas', props: { ...PANE_PROPS, bodyColumns: 80 } })

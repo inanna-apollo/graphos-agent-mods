@@ -61,6 +61,8 @@ A rule never permits a mutation, subscription, root field named for a change, mu
 
 Write-name detection is conservative: an underscore-separated read name containing a write verb, such as `jira_get_issue_update_history`, still requires approval even if a rule names it.
 
+Nested different type conditions on the same value, such as `... on JiraIssue { ... on Node { id } }`, require approval and cannot be used in trust rules. Repeating the same type condition or selecting a different type beneath a child field is supported.
+
 A saved file is loaded at session start, when `/gas trust` runs, or when the plugin reloads. Saving the file alone does not change in-memory rules; the inspector reports that the file changed. A call that does not fit a rule still asks as usual. Use `/gas trust off` and `/gas trust on` to disable and re-enable rules for the current session.
 
 ## Sites and links

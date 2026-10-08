@@ -230,35 +230,73 @@ test('a repeatedly changing bundle stops after one retry and leaves facts unknow
   assert.match(ir.checks!.error!, /bundle changed/)
 })
 
-test('a late response from an older generation cannot roll the cache back', async () => {
+for (const initial of [undefined, 'initial']) {
+  test(`a late catalog response cannot roll back a ${initial === undefined ? 'cold' : 'warm'} cache`, async () => {
+    const cache = emptyCache()
+    let release!: () => void
+    const held = new Promise<void>(resolve => release = resolve)
+    let requested!: () => void
+    const started = new Promise<void>(resolve => requested = resolve)
+    let reads = 0
+    const old: CallGas = async (tool, args) => {
+      if (tool === 'search' && (args.terms as string[]).length === 0) {
+        if (++reads === 1) { requested(); await held; return mcp({ bundleDigest: 'old', scopes: ['confluence'] }) }
+        return mcp({ bundleDigest: 'new', scopes: ['confluence'] })
+      }
+      const response = await fake().call(tool, args)
+      return withDigest(response, 'new')
+    }
+    // Leave discovery in flight, both before and after initial digest adoption.
+    cache.bundleDigest = initial
+    const waiting = enrich(old, cache, build(), OP)
+    await started
+    const current: CallGas = async (tool, args) => {
+      const response = await fake().call(tool, args)
+      return withDigest(response, 'new')
+    }
+    await enrich(current, cache, build(), OP)
+    release()
+    const result = await waiting
+    assert.equal(cache.bundleDigest, 'new')
+    assert.equal(result.bundleDigest, 'new')
+    assert.equal(result.state, 'ready')
+    assert.equal(cache.generation, initial === undefined ? 0 : 1)
+  })
+}
+
+test('a late policy answer cannot replace the current bundle policy', async () => {
   const cache = emptyCache()
+  const fixture = fake()
+  const oldAnswer: CallGas = async (tool, args) => withDigest(await fixture.call(tool, args), 'old')
+  await enrich(oldAnswer, cache, build(), OP)
   let release!: () => void
   const held = new Promise<void>(resolve => release = resolve)
   let requested!: () => void
   const started = new Promise<void>(resolve => requested = resolve)
-  let reads = 0
-  const old: CallGas = async (tool, args) => {
-    if (tool === 'search' && (args.terms as string[]).length === 0) {
-      if (++reads === 1) { requested(); await held; return mcp({ bundleDigest: 'old', scopes: ['confluence'] }) }
-      return mcp({ bundleDigest: 'new', scopes: ['confluence'] })
-    }
-    const response = await fake().call(tool, args)
-    return withDigest(response, 'new')
+  const current: CallGas = async (tool, args) => {
+    if (tool === 'dry_run') return mcp({ bundleDigest: 'new', results: [{ fields: [{ path: 'confluence_search', decision: 'deny' }] }] })
+    return withDigest(await fixture.call(tool, args), 'new')
   }
-  // Establish a generation, then leave another scope lookup in flight.
-  cache.bundleDigest = 'initial'
+  let first = true
+  const old: CallGas = async (tool, args) => {
+    if (tool === 'dry_run' && first) {
+      first = false
+      requested()
+      await held
+      return withDigest(mcp(DRY), 'old')
+    }
+    return first ? oldAnswer(tool, args) : current(tool, args)
+  }
   const waiting = enrich(old, cache, build(), OP)
   await started
-  const current: CallGas = async (tool, args) => {
-    const response = await fake().call(tool, args)
-    return withDigest(response, 'new')
-  }
-  await enrich(current, cache, build(), OP)
+  const latest = await enrich(current, cache, build(), OP)
+  assert.equal(latest.roots[0]!.policy, 'deny')
   release()
   const result = await waiting
   assert.equal(cache.bundleDigest, 'new')
   assert.equal(result.bundleDigest, 'new')
   assert.equal(result.state, 'ready')
+  assert.equal(result.roots[0]!.policy, 'deny')
 })
 
 test('a rejecting dry_run gives partial with unknown policy and does not reject', async () => {

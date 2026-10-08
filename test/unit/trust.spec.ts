@@ -130,6 +130,34 @@ describe('fitCall: shape', () => {
     assert.match(misses('query Q { a: jira_searchIssues(jql: "project = DEV", maxResults: 5) { isLast } b: jira_searchIssues(jql: "project = OPS", maxResults: 5) { isLast } }'), /jql/)
   })
 
+  test('nested type intersections require approval, including through named fragments', () => {
+    // Node includes JiraIssue and other records; dropping JiraIssue would broaden the read.
+    const intersected = 'query R { jira_search { ... on JiraIssue { ... on Node { id } } } }'
+    const parsed = parseTrust(intersected)
+    assert.equal(parsed.rules.length, 0)
+    assert.match(parsed.problems.join('\n'), /different type conditions/)
+    assert.equal(parseTrust('query R { jira_search { ...Issue } } fragment Issue on JiraIssue { ...Any } fragment Any on Node { id }').rules.length, 0)
+    const unrestricted = rules('query R { jira_search }')
+    for (const operation of [
+      '{ jira_search { ... on JiraIssue { ... on Node { id } } } }',
+      '{ jira_search { ... on JiraIssue { ... { ... on Node { id } } } } }',
+      '{ jira_search { ...Issue } } fragment Issue on JiraIssue { ...Any } fragment Any on Node { id }',
+      '{ jira_search { ...Any ... on JiraIssue { ...Any } } } fragment Any on Node { id }',
+    ]) {
+      const fitted = fitCall({ operation }, unrestricted)
+      assert.equal(fitted.isAllowed, false, operation)
+      if (!fitted.isAllowed) assert.match(fitted.reason, /different type conditions/)
+    }
+    // Repeating one type, and conditions on separate object values, retain their meaning.
+    for (const operation of [
+      'query R { jira_search { ... on JiraIssue { ... on JiraIssue { id } } } }',
+      'query R { jira_search { ...Issue } } fragment Issue on JiraIssue { ...Same } fragment Same on JiraIssue { id }',
+      'query R { jira_search { ... on JiraIssue { owner { ... on User { id } } } } }',
+    ]) assert.equal(fitCall({ operation }, rules(operation)).isAllowed, true, operation)
+    const narrow = rules('query R { jira_search { ... on JiraIssue { id } } }')
+    assert.equal(fitCall({ operation: '{ jira_search { ... on Node { id } } }' }, narrow).isAllowed, false)
+  })
+
   test('an undecidable @include cannot fit', () => {
     assert.match(misses('query Q($x: Boolean) { jira_searchIssues(jql: "project = DEV", maxResults: 5) { issues { secret @include(if: $x) } } }'), /secret|@include/)
   })

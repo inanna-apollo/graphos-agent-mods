@@ -5,7 +5,7 @@ This repository publishes `graphos-agent-mods` (display name **GraphOS Agent Mod
 ## Safety boundaries
 
 - The mod never calls Agent Services `execute`. It may call only `search`, `introspect`, `validate`, and `dry_run`, and only after `$.tool.check` returns `allow`. Keep the guard in `hooks/register.tsx`.
-- Trust rules may change only `ask` to `allow`. They cannot override `deny`, an existing `allow`, or an organization ceiling. Mutations, subscriptions, change-named roots, any directive except a resolved `@skip` or `@include`, and unparseable operations must never fit. Changes to `src/trust.ts` need adversarial behavior coverage.
+- Trust rules may change only `ask` to `allow`. They cannot override `deny`, an existing `allow`, or an organization ceiling. Mutations, subscriptions, change-named roots, any directive except a resolved `@skip` or `@include`, nested differing type conditions on the same value, and unparseable operations must never fit. Changes to `src/trust.ts` need adversarial behavior coverage.
 - A saved `trust.graphql` is reported, never read or applied by the file-change handler. In-memory rules change at session start, `/gas trust`, or plugin reload. Do not add a code path that reloads the file on save.
 - Learned links may fill only an unset base, and only from verified vendor metadata in an Agent Services response. Never learn a host from user-authored content or model text. Do not replace a configured or already learned host; validate stored hosts when loading them. Changes to `src/sites.ts` or learned-base merging need adversarial coverage.
 - Live Agent Services checks are read-only. Never test with a mutation or file an access request.
@@ -29,6 +29,8 @@ This repository publishes `graphos-agent-mods` (display name **GraphOS Agent Mod
 - Tests should protect behavior and invariants. UI tests should check user-noticeable outcomes, not exact prose, offsets, or layout props. Use fixtures instead of depending on shipped hosts or changing data. Test pure logic deeply, especially parsing, escaping, trust, learned links, and layout/draw parity. Copy-only edits do not need tests.
 
 ## Checks
+
+Install local development tooling with `npm install --no-package-lock`.
 
 Run focused checks while iterating. Before review, run the applicable full checks:
 

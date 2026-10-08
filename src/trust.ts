@@ -16,11 +16,11 @@
 
 import { adaptExecute } from './adapter.ts'
 import { isRecord, LIMIT_ARGS } from './guards.ts'
-import { MAX_TOKENS, normalize } from './normalize.ts'
+import { MAX_TOKENS, MAX_VISITS, normalize } from './normalize.ts'
 import type { ArgValue, NormalizedField } from './normalize.ts'
 import { isDestructiveName, isWriteName } from './risk.ts'
 import { Kind, parse, print, visit } from './vendor/graphql.js'
-import type { DocumentNode, FragmentDefinitionNode } from './vendor/graphql.js'
+import type { DocumentNode, FragmentDefinitionNode, SelectionNode } from './vendor/graphql.js'
 import type { RootFit, TrustFit } from '../types'
 
 type DefinitionNode = DocumentNode['definitions'][number]
@@ -314,7 +314,37 @@ function eligibilityProblem(doc: DocumentNode, variables: Record<string, unknown
       if (node.kind === Kind.OPERATION_DEFINITION) duplicate((node.variableDefinitions ?? []).map(def => def.variable.name.value), 'variable')
     },
   })
-  return problem
+  return problem ?? nestedTypeProblem(doc)
+}
+
+/** Normalization keeps one type condition per field, so it cannot preserve intersections. */
+function nestedTypeProblem(doc: DocumentNode): string | undefined {
+  const fragments = new Map(doc.definitions.filter((def): def is FragmentDefinitionNode => def.kind === Kind.FRAGMENT_DEFINITION).map(def => [def.name.value, def]))
+  const pending: { selection: SelectionNode; onType?: string }[] = doc.definitions.flatMap(def => def.kind === Kind.OPERATION_DEFINITION ? def.selectionSet.selections.map(selection => ({ selection })) : [])
+  const expanded = new Set<string>()
+  let visits = 0
+  while (pending.length > 0) {
+    if (++visits > MAX_VISITS) return 'the operation has too many selections to check its type conditions for trust rules'
+    const { selection, onType } = pending.pop()!
+    if (selection.kind === Kind.FIELD) {
+      // A child's type condition applies to a new value, not its parent value.
+      for (const child of selection.selectionSet?.selections ?? []) pending.push({ selection: child })
+      continue
+    }
+    const fragment = selection.kind === Kind.FRAGMENT_SPREAD ? fragments.get(selection.name.value) : undefined
+    const nextType = selection.kind === Kind.INLINE_FRAGMENT ? selection.typeCondition?.name.value ?? onType : fragment?.typeCondition.name.value
+    if (onType !== undefined && nextType !== undefined && onType !== nextType) {
+      return `the operation nests different type conditions (${quote(onType)} and ${quote(nextType)}), which rules do not cover`
+    }
+    if (selection.kind === Kind.FRAGMENT_SPREAD) {
+      const key = `${selection.name.value}\u0000${nextType ?? ''}`
+      if (expanded.has(key)) continue
+      expanded.add(key)
+    }
+    const selections = selection.kind === Kind.INLINE_FRAGMENT ? selection.selectionSet.selections : fragment?.selectionSet.selections ?? []
+    for (const child of selections) pending.push({ selection: child, ...(nextType !== undefined && { onType: nextType }) })
+  }
+  return undefined
 }
 
 const quote = (text: string): string => JSON.stringify(text.length > QUOTE_CHARS ? `${text.slice(0, QUOTE_CHARS)}…` : text)

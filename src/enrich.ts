@@ -70,10 +70,14 @@ function noteDigest(cache: EnrichCache, digest: string | undefined): void {
 
 async function read(call: CallGas, cache: EnrichCache, tool: GasTool, args: Record<string, unknown>) {
   const generation = cache.generation
+  const digest = cache.bundleDigest
   const payload = payloadOf(await call(tool, args))
   if (!payload.ok) throw new Error(`${tool}: ${payload.error}`)
   // An old request must neither roll the digest back nor repopulate a new cache.
   if (cache.generation !== generation) throw new GenerationChanged()
+  // Initial discovery adopts a digest without advancing the generation. A
+  // concurrent read that began before discovery must still fit that digest.
+  if (cache.bundleDigest !== digest && payload.bundleDigest !== cache.bundleDigest) throw new GenerationChanged()
   noteDigest(cache, payload.bundleDigest)
   if (cache.generation !== generation) throw new GenerationChanged()
   return payload.value
@@ -145,7 +149,7 @@ type ScopeResult = { validation?: Validation; access?: Access; isSchemaRead: boo
 const SEVERITY: CheckOutcome[] = ['ok', 'skipped', 'not-allowed', 'failed']
 const worse = (a: CheckOutcome, b: CheckOutcome): CheckOutcome => (SEVERITY.indexOf(b) > SEVERITY.indexOf(a) ? b : a)
 
-/** Runs validate, dry_run and the schema lookups for the roots of one scope; never rejects. */
+/** Runs one scope's checks; only a bundle change escapes to the retry loop. */
 async function checkScope(
   call: CallGas,
   cache: EnrichCache,
@@ -159,6 +163,7 @@ async function checkScope(
   /** A failure leaves its facts unknown and records why: not allowed by the user's rules, or an Agent Services error. */
   const settled = <T>(work: Promise<T>, which: readonly (typeof CHECKS)[number][]): Promise<T | undefined> =>
     work.catch((error: unknown) => {
+      if (error instanceof GenerationChanged) throw error
       const isNotAllowed = typeof error === 'object' && error !== null && 'decision' in error
       for (const key of which) checks[key] = isNotAllowed ? 'not-allowed' : 'failed'
       if (!isNotAllowed && checks.error === undefined) checks.error = String(error instanceof Error ? error.message : error).slice(0, 160)
@@ -197,7 +202,7 @@ async function checkScope(
  * and each scope is checked on its own, as a sub-operation of just its roots
  * (src/split.ts), all scopes in parallel; the answers merge back into the one
  * IR. A root no scope claims keeps its facts unknown. Resolves once every
- * source has answered or failed; never rejects.
+ * source has answered or failed; bundle changes escape to the retry loop.
  */
 async function enrichGeneration(call: CallGas, cache: EnrichCache, ir: CallIR, operation: string, variables: Record<string, unknown>): Promise<CallIR> {
   const generation = cache.generation
@@ -211,6 +216,7 @@ async function enrichGeneration(call: CallGas, cache: EnrichCache, ir: CallIR, o
   try {
     scopes = await scopesOf(call, cache)
   } catch (error) {
+    if (error instanceof GenerationChanged) throw error
     const isNotAllowed = typeof error === 'object' && error !== null && 'decision' in error
     const outcome: CheckOutcome = isNotAllowed ? 'not-allowed' : 'failed'
     for (const key of CHECKS) lookup[key] = outcome

@@ -620,6 +620,8 @@ export const MAX_SAVED = 2_000_000
  */
 export function truncationOf(result: unknown): { chars?: number; path?: string } | undefined {
   const text = textOf(result)
+  // JSON responses can quote an engine notice as ordinary record content.
+  if (text !== undefined && /^\s*(?:\{|\[|")/.test(text)) return undefined
   if (text === undefined || !(/exceeds maximum allowed tokens/i.test(text) || /^\s*<persisted-output>\s*Output too large/i.test(text))) return undefined
   const counted = /\(([\d,]+) characters/.exec(text)?.[1]
   const sized = /Output too large \((\d+(?:\.\d+)?)\s*(B|KB|MB)\)/i.exec(text)

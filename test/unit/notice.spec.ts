@@ -8,7 +8,8 @@ import type { CallIR } from '../../src/ir.ts'
 import { normalize } from '../../src/normalize.ts'
 import { outcomeOf } from '../../src/result.ts'
 import { indexSdl } from '../../src/schema.ts'
-import { noticeOf, quotedGlyphs } from '../../src/view/notice.ts'
+import { lookupNoticeOf, noticeOf, quotedGlyphs } from '../../src/view/notice.ts'
+import { catalogCall, dryRunCall, introspectCall, invalidCall, searchCall, validCall } from '../../tests/lookup-fixtures.ts'
 import { inPhrase } from '../../src/preview/changes.ts'
 import { isWriteAllowed } from '../../src/view/outcome.ts'
 import { reviewCall } from '../../tests/review-fixtures.ts'
@@ -193,15 +194,6 @@ test('a value the call wrote never opens a piece of the line with ✓ or ⚑, so
   assert.equal(inPhrase('backend · frontend'), 'backend, frontend')
 })
 
-test('a check that failed says why in plain words, never the raw error', async () => {
-  const { checkFailureWords } = await import('../../src/view/flags.ts')
-  assert.equal(checkFailureWords("graphos-agent-mods: $.mcp.call(claude_ai_X, dry_run) refused: The user doesn't want to proceed with this tool use."), 'the call was stopped')
-  assert.equal(checkFailureWords('mcp__x__dry_run is not allowed without a prompt (ask)'), 'the read-only tools are not allowed')
-  assert.equal(checkFailureWords('no answer from Agent Services in 20 s'), 'no answer in time')
-  assert.equal(checkFailureWords('something odd'), undefined)
-  assert.equal(checkFailureWords(undefined), undefined)
-})
-
 test('a call that ran and validated drops a will-fail prediction made against a schema mid-change', async () => {
   const { notesOf } = await import('../../src/view/notes.ts')
   const { ranValid } = await import('../../src/view/outcome.ts')
@@ -219,4 +211,36 @@ test('a call that ran and validated drops a will-fail prediction made against a 
   assert.equal(ranValid(keptOut), true)
   assert.ok(!notesOf(ir, () => false, true, ranValid(keptOut)).some(note => /will fail/.test(note.text)))
   assert.equal(ranValid({ rows: [], errors: [{ message: 'upstream timed out' }], authLinks: [], isUnreadable: true }), false)
+})
+
+test("a lookup's line says what it found, from its answer", () => {
+  const search = lookupNoticeOf(searchCall()) ?? ''
+  assert.match(search, /confluence_search/)
+  assert.match(search, /Confluence/)
+  assert.match(lookupNoticeOf(catalogCall()) ?? '', /6 services/)
+  assert.match(lookupNoticeOf(introspectCall()) ?? '', /Confluence_SearchResult.*3 fields/)
+  assert.match(lookupNoticeOf(validCall()) ?? '', /valid/)
+  assert.match(lookupNoticeOf(invalidCall()) ?? '', /will fail.*nosuch/)
+  const dry = lookupNoticeOf(dryRunCall()) ?? ''
+  assert.match(dry, /email denied/)
+  assert.match(dry, /1 request failed/)
+})
+
+test("a lookup has no line until its answer is read, and none of an execute's", () => {
+  assert.equal(lookupNoticeOf(searchCall('pending')), undefined)
+  assert.equal(lookupNoticeOf({ ...searchCall(), status: 'errored' }), undefined)
+  const { tool: _tool, ...execute } = searchCall()
+  assert.equal(lookupNoticeOf(execute), undefined)
+})
+
+test("an answer that could not be read says so, and nothing it held", () => {
+  const unreadable = { ...searchCall(), found: { bytes: 10, unreadable: 'upstream <b>timed out</b>' } }
+  assert.match(lookupNoticeOf(unreadable) ?? '', /could not be read/)
+  assert.doesNotMatch(lookupNoticeOf(unreadable) ?? '', /timed out/)
+})
+
+test("a failed lookup's line says Agent Services' error; a refused one has none", () => {
+  const failed = { ...searchCall(), status: 'errored' as const, found: { bytes: 0, error: 'scope `confluence` has no type `SearchResult`' } }
+  assert.match(lookupNoticeOf(failed) ?? '', /has no type/)
+  assert.equal(lookupNoticeOf({ ...failed, status: 'denied' }), undefined)
 })

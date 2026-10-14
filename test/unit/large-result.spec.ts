@@ -109,10 +109,10 @@ test('more rows than the limit argument is flagged in the warning tone', () => {
   assert.ok(flagsOf(ir, outcomeOf(ir, fixture), true).some(flag => /returned\u00a025\u00a0\(asked\u00a03\)$/.test(flag.text)))
 })
 
-test('the return tree says what the call asks for, never what comes back: that is the flags line\'s to say', () => {
+test('the return tree describes its list shape; returned counts belong to the result facts', () => {
   const root = { ...ir.roots[0]!, schema: { type: '[Inc]', isList: true, isNonNull: false, isListItemNonNull: false, isListNonNull: false, scopes: [], tags: [] } }
   const note = returnLines(root as never)[0]?.note ?? ''
-  assert.match(note, /^asks for 3 /)
+  assert.match(note, /^list of /)
   assert.doesNotMatch(note, /up to/)
   assert.doesNotMatch(note, /got/)
   const big = outcomeOf(ir, JSON.stringify({ data: { incidents: Array.from({ length: 25 }, (_, i) => ({ ref: `r${i}`, name: 'n' })) } }))

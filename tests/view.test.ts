@@ -12,8 +12,9 @@ import type { Summary, Validation } from '../src/ir.ts'
 import { normalize } from '../src/normalize.ts'
 import { outcomeOf } from '../src/result.ts'
 import { indexSdl } from '../src/schema.ts'
+import { detailOf } from '../src/view/details.ts'
 import { CLOSED, RawView, viewOf } from '../src/view.tsx'
-import { GLYPH, TREE } from '../src/view/ui/theme.ts'
+import { BACKGROUND, GLYPH, TREE } from '../src/view/ui/theme.ts'
 import type { PaneUi, ViewOptions } from '../src/view.tsx'
 import { LINKS } from '../test/unit/link-fixture.ts'
 
@@ -92,7 +93,7 @@ type On = Body[1]
 type Act = (change: Partial<PaneUi>) => void
 type Drawing = ViewOptions & { /** Draw with a kit that has no Link element. */ noLink?: boolean; act?: Act }
 
-type Drawn = { type?: string; props?: { display?: string; label?: unknown }; children?: unknown[] }
+type Drawn = { type?: string; props?: { display?: string; label?: unknown; backgroundColor?: string; minHeight?: number }; children?: unknown[] }
 const shownText = (node: unknown): string => {
   if (typeof node === 'string') return node
   const one = node as Drawn
@@ -103,12 +104,20 @@ const shownText = (node: unknown): string => {
 /** The text of everything drawn and not hidden: the hidden hover cards (tests/hover.test.ts) are left out. */
 const visibleText = async (pane: { drawn: () => Promise<unknown> }) => shownText(await pane.drawn())
 
+/** Native code chooses its own text palette; record the nearest painted background it receives. */
+function codeBackgrounds(node: unknown, background?: string): (string | undefined)[] {
+  if (node === null || typeof node !== 'object') return []
+  const one = node as Drawn
+  const current = one.props?.backgroundColor ?? background
+  return one.type === 'Code' ? [current] : (one.children ?? []).flatMap(child => codeBackgrounds(child, current))
+}
+
 function draw(on: On, one: InspectedCall | null, ui: PaneUi = CLOSED, options: Drawing = {}) {
   on('ui.render', { component: 'Pane', requestId: 'view-test' }, async ($, e) => {
     const { Box, Text, Code, Button, Link } = $.ui.resolve(e)
     const waiting = one?.status === 'pending' ? 1 : 0
     const { noLink, act, ...rest } = options
-    return viewOf({ Box, Text, Code, Button, ...(noLink !== true && { Link }) }, { call: one, waiting }, e.props.bodyColumns, ui, act ?? (() => undefined), { surface: e.surface, links: LINKS, ...rest })
+    return viewOf({ Box, Text, Code, Button, ...(noLink !== true && { Link }) }, { call: one, waiting }, e.props.bodyColumns, ui, act ?? (() => undefined), { surface: e.surface, links: LINKS, bodyRows: e.props.scroll.bodyRows, ...rest })
   })
 }
 
@@ -118,37 +127,66 @@ for (const surface of ['terminal', 'desktop'] as const) {
     return $.ui.mount({ plugin: 'graphos-agent-mods', surface, component: 'Pane', requestId: 'view-test', props: PANE_PROPS })
   }
 
+  for (const state of ['empty', 'populated'] as const) {
+    test(`the ${state} pane paints its full viewport even below the content (${surface})`, async ($, on) => {
+      const pane = await mount($, on, state === 'empty' ? null : call({ summary: SUMMARY, status: 'ran' }))
+      const drawn = await pane.drawn() as Drawn
+      expect(drawn.type).toBe('Box')
+      expect(drawn.props?.backgroundColor).toBe(BACKGROUND)
+      expect(drawn.props?.minHeight).toBe(PANE_PROPS.scroll.bodyRows)
+      expect(await pane.find({ text: state === 'empty' ? /No GraphOS Agent Services call yet/ : /confluence_search/ })).toBeDefined()
+    })
+  }
+
   test(`a pending call is readable without presses: no buttons, policy inline (${surface})`, async ($, on) => {
     const pane = await mount($, on, call({ summary: SUMMARY }))
-    expect(await pane.find({ text: /awaiting|approval/ })).toBeUndefined()
+    expect(await visibleText(pane)).not.toMatch(/awaiting approval|approval required/)
     expect(await pane.find({ text: /^(ran|denied|failed)$/ })).toBeUndefined()
     expect(await pane.find({ text: /confluence_search/ })).toBeDefined()
     // The flags line says it by path while pending; the notes strip says the field's own facts.
     expect(await pane.find({ text: /hits\.results\.excerpt masked/ })).toBeDefined()
     expect(await pane.find({ text: /1 field masked/ })).toBeUndefined()
     expect(await pane.find({ text: /search:confluence/ })).toBeDefined()
-    expect(await pane.find({ text: /summary\s·\sHaiku/ })).toBeDefined()
+    expect(await pane.find({ text: /Haiku/ })).toBeDefined()
     expect(await pane.findAll({ type: 'Button' })).toHaveLength(0)
   })
 
-  test(`a settled call offers raw as a button, and draws no operation text inline (${surface})`, async ($, on) => {
+  test(`a settled call keeps raw controls and operation source out of the Inspector body (${surface})`, async ($, on) => {
     const pane = await mount($, on, call({ summary: SUMMARY, status: 'ran' }))
     expect(await pane.find({ text: /^ran$/ })).toBeDefined()
-    expect(await pane.find({ type: 'Button', key: 'raw' })).toBeDefined()
+    expect(await pane.find({ type: 'Button', key: 'raw' })).toBeUndefined()
     expect(await pane.find({ type: 'Button', key: 'why' })).toBeUndefined()
     expect(await pane.find({ type: 'Code' })).toBeUndefined()
   })
 
   test(`the raw pane shows the operation with its aliases and variables (${surface})`, async ($, on) => {
+    const one = call({ summary: SUMMARY, status: 'ran' })
     on('ui.render', { component: 'Pane', requestId: 'raw-test' }, async ($, e) => {
       const { Box, Text, Code, Button } = $.ui.resolve(e)
-      return RawView({ kit: { Box, Text, Code, Button }, call: call({ summary: SUMMARY, status: 'ran' }), onClose: () => undefined })
+      return RawView({ kit: { Box, Text, Code, Button }, call: one, onClose: () => undefined })
     })
     const raw = await $.ui.mount({ plugin: 'graphos-agent-mods', surface, component: 'Pane', requestId: 'raw-test', props: PANE_PROPS })
     expect(await raw.find({ type: 'Code', text: /hits: confluence_search/ })).toBeDefined()
     expect(await raw.find({ text: /aliases: .*hits/ })).toBeDefined()
-    expect(await raw.find({ type: 'Code', text: /query plan/ })).toBeDefined()
+    const variables = await raw.find({ type: 'Code', text: /query plan/ })
+    expect(variables?.props.source).toBe(one.variables)
     expect(await raw.find({ type: 'Button', key: 'close' })).toBeDefined()
+  })
+
+  test(`raw input with a long single line preserves every character in wrapping text (${surface})`, async ($, on) => {
+    const variables = JSON.stringify({ value: `${'x'.repeat(30_000)} RAW_INPUT_TAIL` })
+    const one = { ...call({ status: 'ran' }), variables }
+    on('ui.render', { component: 'Pane', requestId: 'long-raw-test' }, ($, e) => {
+      const { Box, Text, Code, Button } = $.ui.resolve(e)
+      return RawView({ kit: { Box, Text, Code, Button }, call: one })
+    })
+    const raw = await $.ui.mount({ plugin: 'graphos-agent-mods', surface, component: 'Pane', requestId: 'long-raw-test', props: PANE_PROPS })
+    const input = await raw.find({ type: 'Text', text: /RAW_INPUT_TAIL/ })
+    // Code's native renderer elides very long source lines even when its source is complete.
+    expect(input?.text).toBe(variables)
+    expect(input?.props.wrap).toBe('wrap')
+    expect(await raw.find({ type: 'Code', text: /RAW_INPUT_TAIL/ })).toBeUndefined()
+    expect(await raw.find({ type: 'Code', text: /hits: confluence_search/ })).toBeDefined()
   })
 
   /** The smallest drawn Box whose text matches: the row a note sits in. */
@@ -166,7 +204,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
   test(`the headline credits its source (${surface})`, async ($, on) => {
     const pane = await mount($, on, call({ summary: SUMMARY, status: 'ran' }))
     expect(await rowOf(pane, /Searches Confluence for pages/)).toBeDefined()
-    expect(await pane.find({ text: /^summary · Haiku$/ })).toBeDefined()
+    expect(await pane.find({ text: /^Haiku$/ })).toBeDefined()
   })
 
   test(`a masked field is marked with its reason, quietly (${surface})`, async ($, on) => {
@@ -281,7 +319,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
   test(`with no call yet the pane says how to open it (${surface})`, async ($, on) => {
     const empty = await mount($, on, null, CLOSED, { bodyRows: 30 })
     expect(await empty.find({ text: /No GraphOS Agent Services call yet/ })).toBeDefined()
-    expect(await empty.find({ text: /^\/gas$/ })).toBeDefined()
+    expect(await empty.find({ text: /Ask Claude to find an operation/ })).toBeDefined()
   })
 
   test(`analyzing shows the root right away and says policy is still being checked (${surface})`, async ($, on) => {
@@ -301,6 +339,11 @@ for (const surface of ['terminal', 'desktop'] as const) {
     const pane = await mount($, on, call({ operation: 'query { confluence_search(cql: "x" { title }' }))
     expect(await pane.find({ text: /Could not read this operation/ })).toBeDefined()
     expect(await pane.find({ type: 'Code', text: /confluence_search\(cql/ })).toBeDefined()
+    // Both the operation and variables need the native palette's background,
+    // rather than inheriting the surrounding Apollo canvas.
+    const backgrounds = codeBackgrounds(await pane.drawn())
+    expect(backgrounds).toHaveLength(2)
+    for (const background of backgrounds) expect(background).toBe('userMessageBackground')
   })
 }
 
@@ -342,7 +385,7 @@ const PREVIEW = {
   authLinks: [],
 }
 
-const NAV = { count: 12, position: 3, isLive: false, older: 3, newer: 1 }
+const NAV = { count: 12, position: 3, isLive: false, older: { kind: 'call' as const, id: 'older-3' }, newer: { kind: 'call' as const, id: 'newer-1' } }
 
 for (const surface of ['terminal', 'desktop'] as const) {
   const mount = async ($: Body[0], on: On, one: InspectedCall | null, ui: PaneUi = CLOSED, options: Drawing = {}) => {
@@ -430,10 +473,10 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(await pending.find({ text: /12\/12|◉/ })).toBeDefined()
   })
 
-  test(`no history controls with a single call, raw stays (${surface})`, async ($, on) => {
+  test(`a single call has no history or raw controls (${surface})`, async ($, on) => {
     const alone = await mount($, on, call({ status: 'ran' }))
     for (const key of ['older', 'newer', 'live']) expect(await alone.find({ type: 'Button', key })).toBeUndefined()
-    expect(await alone.find({ type: 'Button', key: 'raw' })).toBeDefined()
+    expect(await alone.find({ type: 'Button', key: 'raw' })).toBeUndefined()
   })
 
   test(`a past call says so and steps newer, with no separate live button (${surface})`, async ($, on) => {
@@ -444,7 +487,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
   })
 
   test(`the live call does not say earlier, and has no live button (${surface})`, async ($, on) => {
-    const live = await mount($, on, call({ status: 'ran' }), CLOSED, { nav: { count: 12, position: 12, isLive: true, older: 1 } })
+    const live = await mount($, on, call({ status: 'ran' }), CLOSED, { nav: { count: 12, position: 12, isLive: true, older: { kind: 'call' as const, id: 'older-1' } } })
     expect(await live.find({ text: /earlier call/ })).toBeUndefined()
     expect(await live.find({ type: 'Button', key: 'live' })).toBeUndefined()
     expect(await live.find({ type: 'Button', key: 'older' })).toBeDefined()
@@ -452,15 +495,17 @@ for (const surface of ['terminal', 'desktop'] as const) {
 
   test(`with no scope anywhere the policy card says so, and the pane itself does not (${surface})`, async ($, on) => {
     const pane = await mount($, on, withoutScopes(call()))
-    expect(await pane.find({ text: /no scopes required by the schema/ })).toBeDefined()
+    expect(await pane.find({ text: /no scopes listed for the selected fields in the available schema/ })).toBeDefined()
     expect(await visibleText(pane)).not.toMatch(/no scopes/)
   })
 
   test(`an unavailable policy says why, escaped and short (${surface})`, async ($, on) => {
     const error = `Agent Services dry_run: 503 \u001b[31m ${'x'.repeat(200)}`
     const pane = await mount($, on, unchecked(call(), { policy: 'failed', validation: 'ok', schema: 'ok', error }))
-    expect(await pane.find({ text: /policy (and schema )?not checked/ })).toBeDefined()
-    expect(await pane.find({ text: /503 \\x1b\[31m/ })).toBeDefined()
+    expect(await visibleText(pane)).not.toMatch(/503|policy not checked/)
+    const facts = detailOf(unchecked(call(), { policy: 'failed', validation: 'ok', schema: 'ok', error }), 'checks')?.lines.join(' ') ?? ''
+    expect(facts).toContain('503')
+    expect(facts).not.toMatch(/\x1b/)
     expect(await visibleText(pane)).not.toMatch(/x{80}/)
     expect(await pane.find({ text: /\x1b/ })).toBeUndefined()
     // No meter and no counts when no policy is known.
@@ -469,13 +514,14 @@ for (const surface of ['terminal', 'desktop'] as const) {
 
   test(`access not checked, when dry_run was not allowed, says how to check (${surface})`, async ($, on) => {
     const pane = await mount($, on, unchecked(call(), { policy: 'not-allowed', validation: 'ok', schema: 'ok' }))
-    expect(await pane.find({ text: /access not checked/ })).toBeDefined()
-    expect(await pane.find({ text: /allow Agent Services dry_run to check/ })).toBeDefined()
+    expect(await visibleText(pane)).toMatch(/access check permission unavailable/)
+    expect(await visibleText(pane)).not.toMatch(/allow Agent Services dry_run to check/)
   })
 
   test(`access not checked, when no service claims the roots, says so (${surface})`, async ($, on) => {
     const pane = await mount($, on, unchecked(call(), { policy: 'skipped', validation: 'ok', schema: 'ok' }))
-    expect(await pane.find({ text: /no service in Agent Services claims it/ })).toBeDefined()
+    expect(await visibleText(pane)).toMatch(/access evidence unavailable/)
+    expect(await visibleText(pane)).not.toMatch(/no service .*claims/)
     expect(await pane.find({ text: /span services/ })).toBeUndefined()
   })
 
@@ -503,10 +549,10 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(text).not.toMatch(/each present/)
   })
 
-  test(`a headline still being written shimmers where it will land (${surface})`, async ($, on) => {
+  test(`the execute form stays visible while its headline is being written (${surface})`, async ($, on) => {
     const reading = call()
     const pane = await mount($, on, { ...reading, ir: { ...reading.ir, isSummarizing: true } })
-    expect(await pane.find({ text: /^✻$/ })).toBeDefined()
+    expect(await pane.find({ text: /^confluence_search$/ })).toBeDefined()
   })
 
   test(`the fallback headline stays still once the summary has failed (${surface})`, async ($, on) => {
@@ -514,10 +560,9 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(await pane.find({ text: /^✻$/ })).toBeUndefined()
   })
 
-  test(`a pending call with no summary and no list limit still draws a shimmering headline row (${surface})`, async ($, on) => {
+  test(`a pending call without a headline still shows the operation (${surface})`, async ($, on) => {
     const bare = call({ operation: '{ confluence_search(cql: "x") { totalSize } }', isEnriched: false })
     const pane = await mount($, on, { ...bare, ir: { ...bare.ir, isSummarizing: true } })
-    expect(await pane.find({ text: /^✻$/ })).toBeDefined()
     expect(await pane.find({ text: /confluence_search/ })).toBeDefined()
   })
 
@@ -534,7 +579,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
     })
     const pane = await $.ui.mount({ plugin: 'graphos-agent-mods', surface, component: 'Pane', requestId: 'view-test', props: PANE_PROPS })
     expect(await pane.find({ text: /1 of 3/ })).toBeDefined()
-    expect(await pane.find({ text: /awaiting|approval/ })).toBeUndefined()
+    expect(await visibleText(pane)).not.toMatch(/awaiting approval|approval required/)
   })
 
   test(`counts cover visible data fields only; all-allowed says so (${surface})`, async ($, on) => {
@@ -542,7 +587,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
     const allow = (fields: typeof one.ir.roots): typeof one.ir.roots => fields.map(f => ({ ...f, policy: 'allow' as const, children: allow(f.children) }))
     const pane = await mount($, on, { ...one, ir: { ...one.ir, roots: allow(one.ir.roots) } })
     // title, excerpt, url, lastModified, content.id, content.type, totalSize
-    expect(await pane.find({ text: /✓ all 7 allowed/ })).toBeDefined()
+    expect(await pane.find({ text: /✓ all 7 selected fields allowed/ })).toBeDefined()
     expect(await pane.find({ text: /MASKED/ })).toBeUndefined()
   })
 

@@ -13,7 +13,10 @@ test('releases compare by number, segment by segment', () => {
 })
 
 test('an older release gets one line saying what to do; a current or unknown one gets none', () => {
-  assert.match(versionNote('2.1.288', 'graphos-agent-mods') ?? '', new RegExp(`needs Claude Code ${MIN_CLAUDE_CODE.replace(/\./g, '\\.')} or later \\(this is 2\\.1\\.288\\): run \`claude update\``))
+  const note = versionNote('2.1.288', 'graphos-agent-mods') ?? ''
+  assert.match(note, new RegExp(`needs Claude Code ${MIN_CLAUDE_CODE.replace(/\./g, '\\.')} or later \\(this is 2\\.1\\.288\\)`))
+  assert.match(note, /Desktop Code.*update the app.*new Local session/)
+  assert.match(note, /terminal Claude Code.*claude update/)
   assert.equal(versionNote(MIN_CLAUDE_CODE, 'x'), undefined)
   assert.equal(versionNote('9.0.0', 'x'), undefined)
   assert.equal(versionNote(undefined, 'x'), undefined)

@@ -99,7 +99,7 @@ for (const columns of [50, 64]) {
       expect(flat).toMatch(/reference only/)
       if (status === 'pending') return
       // One list: the count, then its items. At 50 columns `more available` is said shorter rather than wrapped.
-      expect(flat).toMatch(/RESULT 5 incidents · first page · more( available)? /)
+      expect(flat).toMatch(/RESULT 5 incidents · (first page requested · )?more( available)? /)
       expect(text).not.toMatch(/\bmore {2}true/)
       // The newest date rides on each preview row, not the status.
       expect(text).toMatch(/\S.*Oct 2 2026/)

@@ -215,14 +215,14 @@ for (const retained of [false, true]) {
     expect(await view.find({ text: /engine result/ })).toBeDefined()
     expect(await view.find({ text: /First issue/ })).toBeDefined()
     expect(await view.find({ text: /saved to a file/ })).toBeDefined()
-    expect(gas.seen.statuses.at(-1)).toMatch(/1 call\b/)
+    expect(gas.seen.statuses.every(line => line === undefined)).toBe(true)
     expect(gas.seen.statuses.some(line => / read\b/.test(line ?? ''))).toBe(false)
     const folded = await $.ui.mount({ plugin: 'graphos-agent-mods', surface: 'terminal', component: 'ToolGroup', props: { calls: [groupCall(id, true)], isActive: false, isExpanded: false } })
     expect(await folded.find({ text: /First issue/ })).toBeDefined()
   })
 }
 
-test('a settled row keeps its block after it leaves the history, and redraws for no one else’s call', async ($, on) => {
+test('a settled row keeps its block and redraws for no one else’s call', async ($, on) => {
   const gas = world(on)
   await start($)
   await $.tool.call({ tool: EXECUTE, operation: OPERATION })
@@ -231,7 +231,7 @@ test('a settled row keeps its block after it leaves the history, and redraws for
   const own = await resultRow($, first)
   expect(await own.find({ text: /First issue/ })).toBeDefined()
 
-  // Twenty more calls push the first out of the pane's history; its row is drawn no more for them.
+  // Unrelated calls must not redraw an already completed result row.
   const drawn = gas.seen.draws.get(first)
   for (let call = 0; call < 20; call++) {
     await $.tool.call({ tool: EXECUTE, operation: OPERATION.replace('Open', `Open${call}`) })

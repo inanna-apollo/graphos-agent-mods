@@ -19,8 +19,13 @@ export type {
   CallWeight,
   WeightField,
   CheckOutcome,
+  CheckTarget,
+  CheckContext,
   Checks,
   RootFit,
   TrustFit,
   CallAgent,
+  LookupTool,
+  LookupInput,
+  LookupFound,
 } from '../types'

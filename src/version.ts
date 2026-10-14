@@ -24,5 +24,5 @@ export function isOlder(a: string, b: string): boolean | undefined {
 /** The line to log when the running release (`base`, as `$.session.version()` gives it) is older than the minimum; undefined otherwise. */
 export function versionNote(base: string | undefined, plugin: string): string | undefined {
   if (base === undefined || isOlder(base, MIN_CLAUDE_CODE) !== true) return undefined
-  return `${plugin} needs Claude Code ${MIN_CLAUDE_CODE} or later (this is ${base}): run \`claude update\`, then restart Claude Code.`
+  return `${plugin} needs Claude Code ${MIN_CLAUDE_CODE} or later (this is ${base}). In Desktop Code, update the app and start a new Local session; in terminal Claude Code, run \`claude update\` and restart.`
 }

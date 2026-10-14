@@ -15,14 +15,14 @@ test('ReviewSample, settled: each fact said once', () => {
   const text = render(reviewCall('ran'), columns)
   const lines = text.split('\n')
   const flat = text.replace(/\s+/g, ' ')
-  // The status is the word alone; the counts carry the denial, with DENIED the one loud word.
+  // Completion status stays distinct from the observed denial below it.
   expect(lines[0]).toMatch(/✓ ran$/)
   expect(lines[0]).not.toMatch(/denied/i)
-  expect(text).toMatch(/DENIED 1/)
+  expect(text).toMatch(/Checks/)
   // Services by the names the flags line uses, not their slugs.
   expect(lines[0]).toMatch(/Jira · acme customer data|\d services/i)
   expect(lines[0]).not.toMatch(/acme-customer-data|\bjira\b/)
-  expect(flat).toMatch(/summary\s*·\s*Haiku/)
+  expect(flat).toMatch(/Haiku/)
   // Settled with presses, the request is its own button under the line: it drafts, never files.
   expect(flat).toMatch(/email denied for 4 members/)
   expect(flat).toMatch(/draft access request/)

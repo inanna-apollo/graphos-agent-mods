@@ -62,7 +62,7 @@ test('payloadOf reports content it cannot read', () => {
 })
 
 test('validationOf splits one errors string into one diagnostic per Error block', () => {
-  const validation = validationOf(VALIDATE_BAD)
+  const validation = validationOf(VALIDATE_BAD)!
   assert.equal(validation.valid, false)
   assert.equal(validation.diagnostics.length, 2)
   assert.match(validation.diagnostics[0]!, /^Error: expected value of type String!/)
@@ -73,8 +73,8 @@ test('validationOf of a valid operation has no diagnostics', () => {
   assert.deepEqual(validationOf({ valid: true, scope: 'confluence' }), { valid: true, diagnostics: [] })
 })
 
-test('validationOf treats a missing valid flag as invalid', () => {
-  assert.equal(validationOf({}).valid, false)
+test('validationOf leaves missing or malformed validity unknown', () => {
+  for (const valid of [undefined, null, 'false', 0]) assert.equal(validationOf({ valid }), undefined)
 })
 
 test('accessOf maps paths to decisions and drops unknown decisions', () => {

@@ -153,18 +153,18 @@ test('history holds settled calls newest first, and last is its head', () => {
   assert.equal(state.last?.id, 'c2')
 })
 
-test('history is capped at 20 and old entries drop their heavy fields', () => {
+test('history keeps 128 complete models before evicting its oldest call', () => {
   const heavy = (id: string): InspectedCall => ({ ...call(id), ir: { toolCallId: id, state: 'ready', roots: [], printed: 'query { a }' } as InspectedCall['ir'] })
   let state = EMPTY
-  for (let i = 0; i < 25; i++) state = settle(arrive(state, heavy(`c${i}`)), `c${i}`, 'ran')
-  assert.equal(state.history.length, 20)
-  assert.equal(state.history[0]!.id, 'c24')
-  assert.equal(state.history[19]!.id, 'c5')
+  for (let i = 0; i < 133; i++) state = settle(arrive(state, heavy(`c${i}`)), `c${i}`, 'ran')
+  assert.equal(state.history.length, 128)
+  assert.equal(state.history[0]!.id, 'c132')
+  assert.equal(state.history[127]!.id, 'c5')
   assert.equal(state.history[4]!.ir.printed, 'query { a }')
-  assert.equal(state.history[5]!.ir.printed, undefined)
+  assert.equal(state.history[5]!.ir.printed, 'query { a }')
 })
 
-test('old history entries keep that a denied field had a token, never the token', () => {
+test('full session models retain denial facts; host overview projection omits tokens', () => {
   const token = 'x'.repeat(16_000)
   const denied = { name: 'email', coordinate: 'User.email', path: 'me.email', args: [], policy: 'deny', denialContext: token, children: [] }
   const root = { name: 'me', coordinate: 'Query.me', path: 'me', args: [], policy: 'allow', children: [denied] }
@@ -174,9 +174,8 @@ test('old history entries keep that a denied field had a token, never the token'
   assert.equal(state.history[0]!.ir.roots[0]!.children[0]!.denialContext, token)
   const old = state.history[9]!.ir.roots[0]!.children[0]!
   assert.notEqual(old.denialContext, undefined)
-  assert.equal(old.denialContext!.length, 0)
-  // Only the newest five carry it (and `last`, the newest again).
-  assert.equal(state.history.filter(one => one.ir.roots[0]!.children[0]!.denialContext === token).length, 5)
+  assert.equal(old.denialContext!.length, 16_000)
+  assert.equal(state.history.filter(one => one.ir.roots[0]!.children[0]!.denialContext === token).length, 10)
 })
 
 test('patches reach history too', () => {
@@ -205,54 +204,16 @@ const slackOutcome = (chars = 2_000) => {
 }
 const ranWith = (state: ReturnType<typeof settled>, id: string, outcome: NonNullable<InspectedCall['outcome']>) => patchOutcome(settle(arrive(state, call(id)), id, 'ran'), id, outcome)
 
-test('the newest settled call keeps 25 rows a list to open out to; older entries keep the rows shown before a press, the rest counted', () => {
+test('history preserves complete bounded previews for older calls and late outcomes', () => {
   const full = slackOutcome()
-  let state = ranWith(EMPTY, 'a', full)
-  assert.deepEqual(state.history[0]!.outcome, full)
-  assert.equal(state.last?.outcome, full)
-  state = ranWith(state, 'b', full)
-  assert.equal(state.history[0]!.outcome?.preview?.[0]?.items.length, 25)
-  const older = state.history[1]!.outcome!
-  for (const [at, list] of (older.preview ?? []).entries()) {
-    const was = full.preview![at]!
-    assert.equal(list.items.length, PREVIEW_SHOWN)
-    // Every row still counted: shown, or `… N more`.
-    assert.equal(list.items.length + list.more, was.items.length + was.more)
-    assert.deepEqual(list.at, was.at?.slice(0, PREVIEW_SHOWN))
-    assert.deepEqual(list.items.map(item => item.label), was.items.slice(0, PREVIEW_SHOWN).map(item => item.label))
-    // Links still match from what the rows kept.
-    assert.deepEqual(list.items.map(item => item.raw), was.items.slice(0, PREVIEW_SHOWN).map(item => item.raw))
-    for (const item of list.items) {
-      assert.ok([...(item.text ?? '')].length <= 400)
-      assert.ok((item.fields ?? []).every(field => [...(field.value ?? '')].length <= 80))
-    }
-  }
-  // Counts, errors and totals are the outcome's as it was.
-  assert.deepEqual(older.rows, full.rows)
-  assert.deepEqual(older.errors, full.errors)
-})
-
-test('an older entry of the heaviest preview stays in the low tens of KB, and trimming it again changes nothing', () => {
-  const state = ranWith(ranWith(EMPTY, 'a', slackOutcome()), 'b', slackOutcome())
-  const older = state.history[1]!.outcome!
-  assert.ok(JSON.stringify(older).length < 30_000, String(JSON.stringify(older).length))
-  assert.equal(compactOutcome(older), older)
-  // Twenty of them, the newest whole: a fraction of twenty whole ones.
-  let many = EMPTY
-  for (let i = 0; i < 25; i++) many = ranWith(many, `c${i}`, slackOutcome())
-  const size = JSON.stringify(many).length
-  assert.ok(size < 1_000_000, String(size))
-  assert.ok(many.history.slice(1).every(one => JSON.stringify(one.outcome).length < 30_000))
-})
-
-test('an outcome that lands on an older entry (it answered after a later call settled) is kept as that place keeps it', () => {
-  let state = settle(arrive(arrive(EMPTY, call('a')), call('b')), 'a', 'ran')
-  state = settle(state, 'b', 'ran')
-  state = patchOutcome(state, 'a', slackOutcome())
-  assert.equal(state.history[1]!.id, 'a')
-  assert.equal(state.history[1]!.outcome?.preview?.[0]?.items.length, PREVIEW_SHOWN)
-  state = patchOutcome(state, 'b', slackOutcome())
-  assert.equal(state.history[0]!.outcome?.preview?.[0]?.items.length, 25)
+  let state = ranWith(ranWith(EMPTY, 'a', full), 'b', full)
+  assert.deepEqual(state.history[1]!.outcome, full)
+  assert.equal(state.history[1]!.outcome?.preview?.[0]?.items.length, 25)
+  state = patchOutcome(state, 'a', full)
+  assert.deepEqual(state.history[1]!.outcome, full)
+  for (let i = 0; i < 25; i++) state = ranWith(state, `c${i}`, full)
+  assert.equal(state.history.length, 27)
+  assert.ok(state.history.every(one => one.outcome?.preview?.[0]?.items.length === 25))
 })
 
 test('an outcome with no preview, or one already small, is kept as it is', () => {

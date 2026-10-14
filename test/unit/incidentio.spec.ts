@@ -1,4 +1,4 @@
-// The incident.io shape: verb fallback, people marked once, argument-name cap, view-time scalar filtering.
+// The incident.io shape: verb fallback, people marked per occurrence, argument-name cap, view-time scalar filtering.
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
@@ -48,10 +48,14 @@ test('a root name with no service prefix keeps its first word: deleteUser is DEL
   assert.equal(verb('ping'), 'CALL')
 })
 
-test('people are tagged once; only the email leaves get the triangle', () => {
+test('both people occurrences have their own personal email marker', () => {
   const ir = enriched()
-  // Marks are by coordinate: both email leaves share it, so both draw the triangle.
-  assert.deepEqual(attentionOf(ir).map(one => one.coordinate), ['IncidentIO_UserSlim.email'])
+  const marks = attentionOf(ir)
+  assert.deepEqual(marks.map(one => one.path), [
+    'incidentio_incidents.creator.user.email',
+    'incidentio_incidents.incidentRoleAssignments.assignee.email',
+  ])
+  assert.ok(marks.every(one => one.coordinate === 'IncidentIO_UserSlim.email' && one.reason === 'personal data'))
   const root = ir.roots[0]!
   const creator = root.children.find(child => child.name === 'creator')!
   assert.deepEqual(tagsOf(root, creator).map(tag => tag.text), ['  person'])

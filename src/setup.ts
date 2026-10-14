@@ -41,14 +41,14 @@ const list = (names: readonly string[]) => (names.length <= 1 ? (names[0] ?? '')
 /** One step: its first line, then the lines under it. */
 type Step = string[]
 
-export const READY = 'GraphOS Inspector is ready. Ask Claude for anything from GraphOS Agent Services; the pane opens on a wide terminal, or with /gas.'
+export const READY = 'GraphOS Inspector is ready. Ask Claude for anything from GraphOS Agent Services; run /gas to open the pane.'
 
 function versionSteps(version: SetupFacts['version']): Step[] {
-  if (version === undefined) return [[`Check that Claude Code is ${MIN_CLAUDE_CODE} or later (\`claude --version\`; \`claude update\` brings it up to date): its version could not be read here.`]]
+  if (version === undefined) return [[`Check that this session runs Claude Code ${MIN_CLAUDE_CODE} or later: use /status in Desktop Code or \`claude --version\` in a terminal. Update the Desktop app or CLI if needed; its version could not be read here.`]]
   const note = versionNote(version.base, 'GraphOS Agent Mods')
   if (note !== undefined) return [[`Update Claude Code: ${note}`]]
   // Skip the release comparison for development builds.
-  return version.base !== undefined && isOlder(version.base, MIN_CLAUDE_CODE) === true ? [[`Update Claude Code to ${MIN_CLAUDE_CODE} or later (\`claude update\`).`]] : []
+  return version.base !== undefined && isOlder(version.base, MIN_CLAUDE_CODE) === true ? [[`Update Claude Code to ${MIN_CLAUDE_CODE} or later (Desktop: update the app and start a new Local session; terminal: run \`claude update\` and restart).`]] : []
 }
 
 function connectorSteps(servers: SetupFacts['servers']): Step[] {
@@ -70,7 +70,7 @@ function permissionNotes(facts: SetupFacts): string[] {
     const capped = own.filter(one => one.state === 'capped').map(one => one.tool)
     const label = servers.length > 1 ? ` on ${server(name)}` : ''
     // Optional: the pane works without them, marking access as not checked, and says so on the call itself.
-    if (asks.length > 0) notes.push(`Optional: allow Agent Services' ${list(asks)}${label} in /permissions and the pane checks access and schema before you approve. None of them changes data.`)
+    if (asks.length > 0) notes.push(`Optional: allow Agent Services' ${list(asks)}${label} for access and schema checks before approval. Use /permissions in terminal Claude Code; for Desktop Code, edit the shared settings file or use /permissions in the standalone CLI. None of these tools changes data.`)
     if (denied.length > 0) notes.push(`A deny rule (yours or your organization's) blocks ${list(denied)}${label}, so the pane cannot check access with ${denied.length === 1 ? 'it' : 'them'}.`)
     if (capped.length > 0) notes.push(`Your organization's policy limits ${list(capped)}${label}, which a rule of yours cannot widen.`)
   }

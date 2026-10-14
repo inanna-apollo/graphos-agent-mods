@@ -2,7 +2,7 @@
 // view (its static fallback) and the surface module (spinner.tsx), which
 // runs on the drawing thread with no $.
 
-import type { ThemeKey } from 'claude-code'
+import { QUIET, TEXT } from '../ui/theme.ts'
 
 /** Claude Code's own spinner glyphs, in its order. */
 export const SPIN = ['·', '✢', '✳', '✶', '✻', '✽', '✻', '✶', '✳', '✢'] as const
@@ -22,16 +22,8 @@ export const SWEEP_MARGIN = 3
 /** Characters lit around the sweep's center on either side. */
 export const SWEEP_HALF = 1
 
-/**
- * `claude` is a ThemeKey, so it follows the person's theme. `claudeShimmer`
- * is not among the typed keys (Color admits any string, and a surface draws
- * one it does not know its own way); the terminal's themes all define it,
- * as the engine's spinner uses it.
- */
-export const COLOR = {
-  base: 'claude' satisfies ThemeKey,
-  lit: 'claudeShimmer',
-} as const
+/** Readable neutral shimmer on the owned Apollo canvas. */
+export const COLOR = { base: QUIET, lit: TEXT } as const
 
 /** The glyph for frame `step`. */
 export function glyphAt(step: number): string {

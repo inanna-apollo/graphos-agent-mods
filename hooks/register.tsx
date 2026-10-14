@@ -1,19 +1,27 @@
-// GraphOS Inspector: explains each Agent Services execute call while you decide on it.
+// GraphOS Inspector: explains each Agent Services execute call while you decide on it,
+// and Claude's search, introspect, validate and dry_run calls as they run.
 // The only module that touches $. It never denies or rewrites a call: every
 // tool.call path ends in next(e) with e unchanged. It approves only a call
 // that fits the person's own trust rules (src/trust.ts), and only where the
 // engine would have asked.
 
-import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, RenderNode, RenderSurface, Timer } from 'claude-code'
+import { atom, memberOf, read, update } from 'claude-code'
+import type { Args, EngineInterface, Next, NextResult, Register, RenderNode, RenderSurface, Timer } from 'claude-code'
 
-import type { InspectedCall, InspectorCalls } from '../types'
+import type { CallDetailIndex, CallDetailSlot, InspectedCall, InspectorCalls, ResolvedInspectorCalls, SelectedCall, StoredInspectorCalls } from '../types'
 import { adaptExecute } from '../src/adapter.ts'
 import { escapeText } from '../src/escape.ts'
 import { annotate } from '../src/annotate.ts'
+import { appendCheckContext, checkFailureContext } from '../src/checks.ts'
 import { buildIR } from '../src/build.ts'
-import { cacheForServer, enrich, isAllowedWithoutPrompt, scopesOf } from '../src/enrich.ts'
-import type { CallGas, EnrichCache } from '../src/enrich.ts'
+import { cacheForServer, enrich, enrichSchema, isAllowedWithoutPrompt, scopesOf } from '../src/enrich.ts'
+import { accessFromIR, adaptLookup, isOperationLookup, lookupErrorOf, lookupToolOf, pendingIR, settledLookup } from '../src/lookup.ts'
+import type { AdaptedLookup } from '../src/lookup.ts'
+import { CallCache, CALL_CACHE_ENTRIES, EMPTY_DETAILS, EMPTY_STORED, detailIndexFor, fullCalls, isFullCall, legacyDetails, normalizeDetailIndex, normalizeSelection, normalizeStoredCalls, overviewOf, resolveCalls, settleStoredCalls, storeCalls } from '../src/call-cache.ts'
+import { utf8Bytes } from '../src/weight.ts'
+import { ObservationQueue } from '../src/observation.ts'
+import type { ObservationJob } from '../src/observation.ts'
+import type { CallGas, EnrichCache, GasTool } from '../src/enrich.ts'
 import { normalize } from '../src/normalize.ts'
 import { allowedOrigins, configOf, loadLinkConfig } from '../src/links.ts'
 import type { BaseSource, LinkConfig } from '../src/links.ts'
@@ -23,13 +31,13 @@ import { setupReport } from '../src/setup.ts'
 import type { ToolState } from '../src/setup.ts'
 import { versionNote } from '../src/version.ts'
 import { OPEN_TIMEOUT_MS, openArgv } from '../src/open.ts'
-import { arrive, normalizeCalls, EMPTY, isFinal, navOf, newer, older, patchAgent, patchIR, patchOutcome, patchTrust, settle, settleOrphans, shownAt, statusOf } from '../src/queue.ts'
+import { navResolvedOf, selectionOlder, selectionNewer, shownResolvedAt, arrive, EMPTY, isExecute, isFinal, patchAgent, patchIR, patchLookup, patchOutcome, patchTrust, settle, settleOrphans, statusOf } from '../src/queue.ts'
 import { MAX_SAVED, outcomeOf, pickResult, responseIn, savedOutcome, truncationOf } from '../src/result.ts'
 import { gasServers, splitMcpTool } from '../src/servers.ts'
-import { buildPrompt, cacheKey, MAX_TOKENS, parseSummary, SYSTEM_PROMPT } from '../src/summary.ts'
-import type { CallIR, Summary } from '../src/ir.ts'
+import { buildLookupPrompt, buildPrompt, cacheKey, MAX_TOKENS, parseSummary, summarySystemPrompt } from '../src/summary.ts'
+import type { CallIR, LookupTool, Summary } from '../src/ir.ts'
 import { CLOSED, RawView, viewOf } from '../src/view.tsx'
-import { noticeOf } from '../src/view/notice.ts'
+import { lookupNoticeOf, noticeOf } from '../src/view/notice.ts'
 import { trustVerdictOf } from '../src/view/trust.ts'
 import { describeRules, fitCall, parseTrust } from '../src/trust.ts'
 import { agentOf, pluginOf } from '../src/view/agent.ts'
@@ -38,9 +46,8 @@ import { ResultBlockView, ResultRows } from '../src/view/transcript.tsx'
 import type { TranscriptKit } from '../src/view/transcript.tsx'
 import { resultBlockOf } from '../src/view/transcript.ts'
 import type { ResultBlock } from '../src/view/transcript.ts'
-import { statusLine } from '../src/view/status.ts'
 import type { Fit, TrustRule } from '../src/trust.ts'
-import { COLOR } from '../src/view/ui/theme.ts'
+import { BACKGROUND, QUIET } from '../src/view/ui/theme.ts'
 import type { Kit } from '../src/view/kit.ts'
 import { rawTitleOf } from '../src/view/raw.tsx'
 import type { PaneChange } from '../src/view.tsx'
@@ -49,29 +56,203 @@ import { findCall, planSnapshots } from '../src/snapshot/write.ts'
 import type { SnapshotOptions } from '../src/snapshot/options.ts'
 
 const PANE = 'gas'
-// The claude.ai connector's `execute` (src/servers.ts CONNECTOR; the hook matchers spell it inline): no other server's calls reach the hooks.
+// The claude.ai connector's tools (src/servers.ts CONNECTOR; the hook matchers spell it inline): no other server's calls reach the hooks.
 const EXECUTE_TOOL = /^mcp__claude_ai_GraphOS_Agent_Services__execute$/
+// Its tools whose calls the pane shows: execute, and the lookups beside it.
+const GAS_TOOL = /^mcp__claude_ai_GraphOS_Agent_Services__(?:execute|search|introspect|validate|dry_run)$/
 const TITLE = 'GraphOS Inspector'
 // The raw operation of the call shown, in its own docked pane.
 const RAW_PANE = 'gas-raw'
 // The content is laid out for about 60 columns: ask the dock for that much and
 // leave the rest to the transcript. A width the person dragged to still wins.
 const DOCK_COLUMNS = 64
-const calls = atom({ plugin: 'graphos-agent-mods', key: 'calls' } as const, EMPTY)
+const callDetailIndex = atom({ plugin: 'graphos-agent-mods', key: 'callDetailIndex' } as const, EMPTY_DETAILS)
+const detailSlots = atom({ plugin: 'graphos-agent-mods', key: 'callDetails' } as const, null as CallDetailSlot | null)
+const calls = atom({ plugin: 'graphos-agent-mods', key: 'calls' } as const, EMPTY_STORED)
 const hasAutoOpened = atom({ plugin: 'graphos-agent-mods', key: 'hasAutoOpened' } as const, false)
 const pumper = atom({ plugin: 'graphos-agent-mods', key: 'pumper' } as const, '')
-const tally = atom({ plugin: 'graphos-agent-mods', key: 'tally' } as const, { calls: 0, unasked: 0, bytes: 0 })
 const spinner = atom({ plugin: 'graphos-agent-mods', key: 'spinner' } as const, { id: '', text: '' })
 
-/** The calls state, normalized: stored state can predate this code (a reload keeps it). */
+// A single writer coordinates overview and detail state. Full models have no module-owned cache.
+const taskStops = new Set<AbortController>()
+let generation = 0
+let writes: Promise<unknown> = Promise.resolve()
+let pendingWrites = 0
+let writerClaim: Promise<boolean> | undefined
+async function readStoredCalls($: EngineInterface): Promise<StoredInspectorCalls> {
+  return normalizeStoredCalls(await read($, calls))
+}
+/** Hydration is ephemeral: the host owns the only retained full-model cache. */
+async function loadCallCache($: EngineInterface, index: CallDetailIndex, onlyId?: string, fresh = false): Promise<CallCache> {
+  const cache = new CallCache()
+  for (const entry of index.entries) {
+    if (onlyId !== undefined && entry.id !== onlyId) continue
+    const held = fresh ? await update($, memberOf(detailSlots, { requestId: String(entry.slot) }), current => current) : await read($, memberOf(detailSlots, { requestId: String(entry.slot) }))
+    if (held?.epoch !== index.epoch || held.id !== entry.id || held.json === null) continue
+    try {
+      const call = JSON.parse(held.json) as InspectedCall
+      if (call.id !== entry.id || typeof call.operation !== 'string' || typeof call.variables !== 'string' || call.ir === undefined || !Array.isArray(call.ir.roots)) continue
+      if (cache.put(call) !== 'available' || cache.serialized().find(one => one.id === call.id)?.bytes !== entry.bytes) cache.delete(call.id)
+    } catch { /* Corrupt or incompatible detail state remains an explicit overview. */ }
+  }
+  return cache
+}
+async function readDisplayCalls($: EngineInterface): Promise<ResolvedInspectorCalls> {
+  const stored = await readStoredCalls($)
+  const selection = normalizeSelection(await read($, paneUi), stored)
+  const id = shownResolvedAt(stored, selection).call?.id ?? ''
+  const cache = await loadCallCache($, normalizeDetailIndex(await read($, callDetailIndex)), id)
+  return resolveCalls(stored, cache, id)
+}
 async function readCalls($: EngineInterface): Promise<InspectorCalls> {
-  const raw = await read($, calls)
-  return normalizeCalls(raw)
+  const stored = await readStoredCalls($)
+  const cache = await loadCallCache($, normalizeDetailIndex(await read($, callDetailIndex)))
+  return fullCalls(resolveCalls(stored, cache))
+}
+async function readUi($: EngineInterface) {
+  const raw = await read($, paneUi)
+  return { ...CLOSED, ...raw, selection: normalizeSelection(raw, await readStoredCalls($)) }
+}
+/** The retained data epoch survives reload; a writer claim fences the retired module's CAS retries. */
+function ensureCallWriter($: EngineInterface): Promise<boolean> {
+  if (writerClaim !== undefined) return writerClaim
+  const token = generation
+  writerClaim = (async () => {
+    const previousRaw = await read($, calls)
+    const previous = normalizeStoredCalls(previousRaw)
+    let legacy = new CallCache()
+    const owned = await update($, calls, current => {
+      const stored = normalizeStoredCalls(current)
+      if (token !== generation || stored.writer !== previous.writer && stored.writer !== INSTANCE) return stored
+      // Capture the successful CAS input before replacing full legacy objects with metadata.
+      legacy = legacyDetails(current)
+      return { ...stored, writer: INSTANCE }
+    })
+    if (token !== generation || owned.writer !== INSTANCE) return false
+    const previousIndexRaw = await read($, callDetailIndex)
+    const previousIndex = normalizeDetailIndex(previousIndexRaw)
+    const hadNoCatalog = previousIndexRaw?.version === 1 && previousIndexRaw.epoch === '' && Array.isArray(previousIndexRaw.entries) && previousIndexRaw.entries.length === 0
+    let isMigration = false
+    const ownedIndex = await update($, callDetailIndex, current => {
+      const index = normalizeDetailIndex(current)
+      if (token !== generation || index.writer !== previousIndex.writer && index.writer !== INSTANCE) return index
+      // A nonempty epoch includes an ended-session tombstone. It is never a migration target.
+      isMigration = legacy.size > 0 && hadNoCatalog && current?.version === 1 && current.epoch === '' && Array.isArray(current.entries) && current.entries.length === 0
+      const claimed = { ...index, writer: INSTANCE, epoch: index.epoch || `${INSTANCE}:${token}` }
+      return isMigration ? detailIndexFor(legacy, claimed) : claimed
+    })
+    if (token !== generation || ownedIndex.writer !== INSTANCE) return false
+    const migrated = new Map(isMigration ? legacy.serialized().map(entry => [entry.id, entry]) : [])
+    const slots = await Promise.all(Array.from({ length: CALL_CACHE_ENTRIES }, (_, slot) => update($, memberOf(detailSlots, { requestId: String(slot) }), current => {
+      if (token !== generation || current !== null && current.writer !== previousIndex.writer && current.writer !== INSTANCE) return current
+      const retained = ownedIndex.entries.find(entry => entry.slot === slot)
+      const imported = retained === undefined ? undefined : migrated.get(retained.id)
+      if (imported !== undefined) return { epoch: ownedIndex.epoch, writer: INSTANCE, id: imported.id, json: imported.json }
+      return current === null || current.epoch !== ownedIndex.epoch || retained?.id !== current.id ? { epoch: ownedIndex.epoch, writer: INSTANCE, id: '', json: null } : { ...current, writer: INSTANCE }
+    })))
+    if (token !== generation) return false
+    if (isMigration) {
+      const available = new Set(slots.flatMap(slot => slot !== null && slot.epoch === ownedIndex.epoch && slot.writer === INSTANCE && slot.json === migrated.get(slot.id)?.json ? [slot.id] : []))
+      await update($, calls, current => {
+        const stored = normalizeStoredCalls(current)
+        if (token !== generation || stored.writer !== INSTANCE) return stored
+        const restore = (call: typeof stored.history[number]) => available.has(call.id) ? { ...call, details: 'available' as const } : call
+        const history = stored.history.map(restore)
+        return { ...stored, queue: stored.queue.map(restore), history, last: history[0] ?? (stored.last === null ? null : restore(stored.last)) }
+      })
+    }
+    return token === generation
+  })()
+  return writerClaim
 }
 
-/** Updates the calls state; the callback only ever sees the normalized shape. */
-function updateCalls($: EngineInterface, change: (state: InspectorCalls) => InspectorCalls) {
-  return update($, calls, current => change(normalizeCalls(current)))
+function updateCalls($: EngineInterface, change: (state: InspectorCalls) => InspectorCalls, expectedGeneration = generation, observerWrite = false): Promise<InspectorCalls> {
+  if (observations.paused && !observerWrite) return Promise.resolve(EMPTY)
+  pendingWrites += 1
+  const run = writes.catch(() => undefined).then(async () => {
+    if (generation !== expectedGeneration || observations.paused && !observerWrite) return EMPTY
+    if (!await ensureCallWriter($)) return EMPTY
+    const owner = await read($, pumper)
+    if (owner !== '' && owner !== INSTANCE) return EMPTY
+    const ui = await readUi($)
+    let index = normalizeDetailIndex(await update($, callDetailIndex, current => current))
+    if (index.epoch === '') index = await update($, callDetailIndex, current => generation === expectedGeneration && normalizeDetailIndex(current).epoch === '' ? { ...EMPTY_DETAILS, epoch: `${INSTANCE}:${expectedGeneration}` } : normalizeDetailIndex(current))
+    const cache = await loadCallCache($, index, undefined, true)
+    cache.pin(ui.selection)
+    if (index.active !== null) cache.pinActive(index.active)
+    if (generation !== expectedGeneration) return EMPTY
+    let candidate: InspectorCalls = EMPTY
+    let changedModels: InspectedCall[] = []
+    const committed = await update($, calls, current => {
+      if (generation !== expectedGeneration || normalizeStoredCalls(current).writer !== INSTANCE) return normalizeStoredCalls(current)
+      let stored = normalizeStoredCalls(current)
+      for (const orphan of stored.queue.filter(call => call.owner !== INSTANCE)) stored = settleStoredCalls(stored, orphan.id, 'interrupted', ui.selection)
+      const before = fullCalls(resolveCalls(stored, cache))
+      const models = new Map([...before.queue, ...before.history].map(call => [call.id, call]))
+      candidate = change(before)
+      changedModels = [...candidate.queue, ...candidate.history].filter(call => models.get(call.id) !== call)
+      return storeCalls(stored, candidate, ui.selection)
+    })
+    if (generation !== expectedGeneration || committed.writer !== INSTANCE) return EMPTY
+    const availability = new Map<string, ReturnType<CallCache['put']>>()
+    for (const call of changedModels) availability.set(call.id, cache.put(call))
+    const ids = new Set([...committed.queue, ...committed.history].map(call => call.id))
+    cache.retain(ids)
+    const planned = detailIndexFor(cache, index)
+    const changedIds = new Set(changedModels.map(call => call.id))
+    const plannedIds = new Set(planned.entries.map(entry => entry.id))
+    // Free replaced/evicted payloads before growth. A failed clear stops admission while
+    // the old catalog still accounts for that slot; no full model becomes an untracked orphan.
+    for (const entry of index.entries) if (changedIds.has(entry.id) || !plannedIds.has(entry.id)) {
+      await update($, memberOf(detailSlots, { requestId: String(entry.slot) }), current => generation === expectedGeneration && current?.epoch === index.epoch && current.writer === INSTANCE ? { epoch: index.epoch, writer: INSTANCE, id: '', json: null } : current)
+    }
+    const reserved = await update($, callDetailIndex, current => generation === expectedGeneration && normalizeDetailIndex(current).writer === INSTANCE && normalizeDetailIndex(current).epoch === index.epoch ? { ...planned, active: normalizeDetailIndex(current).active } : normalizeDetailIndex(current))
+    if (generation !== expectedGeneration || reserved.epoch !== index.epoch || reserved.writer !== INSTANCE) return EMPTY
+    const serialized = new Map(cache.serialized().map(entry => [entry.id, entry]))
+    for (const entry of planned.entries) {
+      if (!changedIds.has(entry.id)) continue
+      const model = serialized.get(entry.id)!
+      // The host's 4 Mi-character value limit is above our 2 MiB serialized entry limit.
+      // Host CAS retries reapply the writer and data-epoch guards after every conflict.
+      await update($, memberOf(detailSlots, { requestId: String(entry.slot) }), current => generation !== expectedGeneration || current !== null && (current.epoch !== index.epoch || current.writer !== INSTANCE) ? current : { epoch: index.epoch, writer: INSTANCE, id: entry.id, json: model.json })
+      if (generation !== expectedGeneration) return EMPTY
+    }
+    await update($, calls, current => {
+      if (generation !== expectedGeneration || normalizeStoredCalls(current).writer !== INSTANCE) return normalizeStoredCalls(current)
+      const stored = normalizeStoredCalls(current)
+      const repair = (call: typeof stored.history[number]) => ({ ...call, details: cache.has(call.id) ? 'available' as const : availability.get(call.id) === 'oversize' ? 'oversize' as const : call.details === 'available' ? 'expired' as const : call.details })
+      const history = stored.history.map(repair)
+      return { ...stored, queue: stored.queue.map(repair), history, last: history[0] ?? null }
+    })
+    return readCalls($)
+  })
+  writes = run.then(() => { pendingWrites -= 1 }, () => { pendingWrites -= 1 })
+  return run
+}
+
+/** Every possible slot is cleared, including writes that were held before their reservation landed. */
+async function clearSessionDetails($: EngineInterface, token = generation) {
+  const previous = normalizeDetailIndex(await read($, callDetailIndex))
+  if (token !== generation) return
+  // Empty, unclaimed state has no prior owner; a changed claim still wins on CAS retry.
+  if (previous.writer !== INSTANCE && !(previous.writer === '' && previous.entries.length === 0)) throw new Error('Inspector cleanup ownership changed')
+  const epoch = `${INSTANCE}:${token}`
+  const cleared = await update($, callDetailIndex, current => {
+    const index = normalizeDetailIndex(current)
+    return token === generation && index.writer === previous.writer && index.epoch === previous.epoch ? { ...EMPTY_DETAILS, epoch, writer: INSTANCE } : index
+  })
+  if (token !== generation) return
+  if (cleared.writer !== INSTANCE || cleared.epoch !== epoch) throw new Error('Inspector cleanup ownership changed')
+  const slots = await Promise.all(Array.from({ length: CALL_CACHE_ENTRIES }, (_, slot) => update($, memberOf(detailSlots, { requestId: String(slot) }), current => {
+    if (token !== generation || current !== null && !(current.writer === previous.writer && current.epoch === previous.epoch || current.writer === INSTANCE && current.epoch === epoch)) return current
+    return { epoch, writer: INSTANCE, id: '', json: null }
+  })))
+  if (token !== generation) return
+  if (slots.some(slot => slot?.writer !== INSTANCE || slot.epoch !== epoch)) throw new Error('Inspector cleanup ownership changed')
+}
+
+function updateForGeneration($: EngineInterface, token: number, change: (state: InspectorCalls) => InspectorCalls) {
+  return updateCalls($, change, token)
 }
 
 /** Is the raw pane open? The engine's record, not ours: it closes on Esc too. */
@@ -85,7 +266,7 @@ async function isRawOpen($: EngineInterface): Promise<boolean> {
 
 /** The call the main pane shows right now. */
 async function shownCall($: EngineInterface) {
-  return shownAt(await readCalls($), (await read($, paneUi)).cursor ?? null).call
+  return shownResolvedAt(await readDisplayCalls($), (await readUi($)).selection).call
 }
 
 /** Opens the raw pane titled for the call shown, or closes it; true when it is open after. */
@@ -94,14 +275,14 @@ async function toggleRaw($: EngineInterface): Promise<boolean> {
     await $.ui.close({ id: RAW_PANE })
     return false
   }
-  const opened = await $.ui.open({ id: RAW_PANE, title: rawTitleOf(await shownCall($)), focus: true, closeOnEscape: true, columns: DOCK_COLUMNS })
+  const opened = await $.ui.open({ id: RAW_PANE, title: `Raw · ${rawTitleOf(await shownCall($))}`, focus: true, columns: DOCK_COLUMNS })
   return opened.isPlaced
 }
 
 /** Keeps an open raw pane's title on the call it shows (opening again retitles in place). */
 async function retitleRaw($: EngineInterface) {
   try {
-    if (await isRawOpen($)) await $.ui.open({ id: RAW_PANE, title: rawTitleOf(await shownCall($)) })
+    if (await isRawOpen($)) await $.ui.open({ id: RAW_PANE, title: `Raw · ${rawTitleOf(await shownCall($))}` })
   } catch {
     // Best effort: a stale title only.
   }
@@ -224,23 +405,27 @@ const READ_ONLY_GAS_TOOLS: ReadonlySet<string> = new Set(['search', 'introspect'
  * must never interrupt, so it calls a tool only when the user's rules
  * already allow it; anything else stays unknown in the pane.
  */
-function gasCaller($: EngineInterface, server: string): CallGas {
+function gasCaller($: EngineInterface, server: string, token = generation): CallGas {
   return async (tool, args) => {
+    if (token !== generation) throw new Error('Inspector session ended')
     // Hard guard, not just a type: the mod never runs a GraphQL operation.
     if (!READ_ONLY_GAS_TOOLS.has(tool)) throw new Error(`GraphOS Inspector never calls ${String(tool)}`)
     const name = `mcp__${server}__${tool}`
     // Allowed by the person's rules, and not capped below allow by their organization.
     const verdict = await $.tool.check({ tool: name, input: args })
+    if (token !== generation) throw new Error('Inspector session ended')
     const { decision, ceiling } = verdict
-    if (!isAllowedWithoutPrompt(verdict)) throw new NotAllowed(name, ceiling !== undefined && ceiling !== 'allow' ? ceiling : decision)
+    if (!isAllowedWithoutPrompt(verdict)) throw new NotAllowed(tool, decision, ceiling)
     return $.mcp.call(server, tool, args)
   }
 }
 
 class NotAllowed extends Error {
+  readonly checkCause = 'not-allowed'
   constructor(
-    readonly tool: string,
+    readonly tool: GasTool,
     readonly decision: string,
+    readonly ceiling?: string,
   ) {
     super(`${tool} is not allowed without a prompt (${decision})`)
   }
@@ -285,14 +470,18 @@ function logTiming($: EngineInterface, entry: Record<string, unknown>) {
  * it is stored; a rejected or failed answer leaves the deterministic
  * headline in place.
  */
-async function summarize($: EngineInterface, call: InspectedCall, enrichMs: number) {
-  const key = await cacheKey(call.ir, variablesOf(call))
+async function summarize($: EngineInterface, call: InspectedCall, enrichMs: number, token = generation) {
+  if (token !== generation) return
+  const key = await cacheKey(call.ir, variablesOf(call), isExecute(call) ? undefined : call)
+  if (token !== generation) return
   let summary = summaries.get(key)
   if (summary === undefined) {
-    const prompt = buildPrompt(call.ir)
+    const prompt = isExecute(call) ? buildPrompt(call.ir) : buildLookupPrompt(call)
+    const system = summarySystemPrompt(call.tool)
     const started = await $.clock.now()
     const stop = new AbortController()
-    const answer = await withinStep($, 'Haiku', $.model.complete({ model: 'haiku', system: SYSTEM_PROMPT, prompt, maxTokens: MAX_TOKENS, effort: 'low', timeoutMs: 8_000 }, { signal: stop.signal })).finally(() => stop.abort())
+    taskStops.add(stop)
+    const answer = await withinStep($, 'Haiku', $.model.complete({ model: 'haiku', system, prompt, maxTokens: MAX_TOKENS, effort: 'low', timeoutMs: 8_000 }, { signal: stop.signal })).finally(() => { stop.abort(); taskStops.delete(stop) })
     const parsed = answer.isAnswered ? parseSummary(answer.text) : undefined
     summary = parsed?.summary ?? null
     if (await isTiming($)) logTiming($, {
@@ -301,22 +490,23 @@ async function summarize($: EngineInterface, call: InspectedCall, enrichMs: numb
       sinceArrivedMs: started - call.arrivedAt,
       enrichMs,
       haikuMs: (await $.clock.now()) - started,
-      systemChars: SYSTEM_PROMPT.length,
+      systemChars: system.length,
       promptChars: prompt.length,
       usage: answer.usage,
       ...(answer.isAnswered ? { rejected: parsed?.rejected ?? null } : { reason: answer.reason }),
       ...(answer.isAnswered && parsed?.rejected !== undefined && { text: answer.text.slice(0, 200) }),
     })
     // Cache real answers only (an API error may pass); keep the newest 200.
+    if (token !== generation) return
     if (answer.isAnswered) {
       summaries.set(key, summary)
       const oldest = summaries.size > 200 ? summaries.keys().next().value : undefined
       if (oldest !== undefined) summaries.delete(oldest)
     }
   }
-  if (summary === null) return
+  if (token !== generation || summary === null) return
   const found = summary
-  await updateCalls($, current => {
+  await updateForGeneration($, token, current => {
     const latest = [...current.queue, ...current.history].find(one => one.id === call.id)
     return latest === undefined ? current : patchIR(current, call.id, { ...latest.ir, summary: found })
   })
@@ -328,6 +518,7 @@ async function summarize($: EngineInterface, call: InspectedCall, enrichMs: numb
 const STEP_MS = 20_000
 
 class StepTimeout extends Error {
+  readonly checkCause = 'analysis-timeout'
   constructor(readonly step: string) {
     super(`no answer from ${step} in ${STEP_MS / 1000} s`)
   }
@@ -339,14 +530,16 @@ class StepTimeout extends Error {
  * cannot sleep sets no bound.
  */
 function withinStep<T>($: EngineInterface, step: string, work: Promise<T>, ms = STEP_MS): Promise<T> {
+  const token = generation
   const stop = new AbortController()
+  taskStops.add(stop)
   const timeout = new Promise<never>((_, reject) => {
     $.clock.sleep(ms, { signal: stop.signal }).then(
       () => reject(new StepTimeout(step)),
-      () => undefined,
+      () => { if (token !== generation) reject(new Error('Inspector session ended')) },
     )
   })
-  return Promise.race([work, timeout]).finally(() => stop.abort())
+  return Promise.race([work, timeout]).finally(() => { stop.abort(); taskStops.delete(stop) })
 }
 
 /**
@@ -355,13 +548,20 @@ function withinStep<T>($: EngineInterface, step: string, work: Promise<T>, ms = 
  */
 function failedIR(ir: CallIR, error: unknown): CallIR {
   const reason = error instanceof StepTimeout ? error.message : `analysis failed: ${error instanceof Error ? error.message : String(error)}`
-  const checks = { policy: 'failed', validation: 'failed', schema: 'failed', error: reason.slice(0, 160) } as const
+  const checks = appendCheckContext({ policy: 'failed', validation: 'failed', schema: 'failed', error: reason.slice(0, 160) }, (['policy', 'validation', 'schema'] as const).map(check => checkFailureContext(check, { kind: 'call' }, error)))
   const { isSummarizing: _dropped, ...settled } = annotate(ir, { isIncomplete: true, checks })
   return settled.state === 'analyzing' ? { ...settled, state: 'partial', checks } : settled
 }
 
-/** A call the pump should analyse: its checks or its headline are still out, and this instance has not tried it. */
-const needsAnalysis = (call: InspectedCall) => (call.ir.state === 'analyzing' || call.ir.isSummarizing === true) && !attempted.has(call.id)
+/**
+ * A call the pump should analyse: its checks or its headline are still out,
+ * and this instance has not tried it. A lookup only once its answer is read:
+ * the schema pass annotates the answer, and must not land before it.
+ */
+const needsAnalysis = (call: InspectedCall) => (call.ir.state === 'analyzing' || call.ir.isSummarizing === true) && (isExecute(call) || call.found !== undefined) && !attempted.has(call.id)
+
+/** A lookup's IR at rest: one that will not be analysed (it failed, or has no answer) stops saying it is being checked. */
+const restingIR = (ir: CallIR): CallIR => (ir.state === 'analyzing' ? { ...ir, state: 'partial' } : ir)
 
 /**
  * One call's analysis, start to end, detached from every other call's: the
@@ -370,6 +570,8 @@ const needsAnalysis = (call: InspectedCall) => (call.ir.state === 'analyzing' ||
  * retried by this instance.
  */
 async function analyse($: EngineInterface, call: InspectedCall) {
+  const token = generation
+  if (!isExecute(call)) return analyseLookup($, call, token)
   let failure: unknown
   try {
     let ir = call.ir
@@ -377,7 +579,7 @@ async function analyse($: EngineInterface, call: InspectedCall) {
     if (ir.state === 'analyzing') {
       const started = await $.clock.now()
       try {
-        ir = await withinStep($, 'Agent Services', enrich(gasCaller($, call.server), cacheForServer(caches, call.server), ir, call.operation, variablesOf(call)))
+        ir = await withinStep($, 'Agent Services', enrich(gasCaller($, call.server, token), cacheForServer(caches, call.server), ir, call.operation, variablesOf(call)))
       } catch (error) {
         ir = failedIR(ir, error)
       }
@@ -386,11 +588,11 @@ async function analyse($: EngineInterface, call: InspectedCall) {
     // Summarize once the IR carries what the summary must describe; the pane shimmers the headline meanwhile.
     const willSummarize = ir.state !== 'unparseable' && ir.summary === undefined
     const enriched = ir
-    await updateCalls($, current => patchIR(current, call.id, willSummarize ? { ...enriched, isSummarizing: true } : enriched))
+    await updateForGeneration($, token, current => patchIR(current, call.id, willSummarize ? { ...enriched, isSummarizing: true } : enriched))
     void snap($, call.id, 'enriched')
     if (willSummarize) {
       try {
-        await summarize($, { ...call, ir }, enrichMs)
+        await summarize($, { ...call, ir }, enrichMs, token)
       } catch {
         // Haiku failed, answered garbage or ran out of time: the deterministic headline stays.
       }
@@ -399,7 +601,7 @@ async function analyse($: EngineInterface, call: InspectedCall) {
     failure = error
   } finally {
     // Never leave the call analysing or shimmering, whatever failed above.
-    await updateCalls($, current => {
+    await updateForGeneration($, token, current => {
       const latest = findCall(current, call.id)
       if (latest === undefined) return current
       if (latest.ir.state === 'analyzing') return patchIR(current, call.id, failedIR(latest.ir, failure ?? new Error('stopped')))
@@ -408,8 +610,51 @@ async function analyse($: EngineInterface, call: InspectedCall) {
       return patchIR(current, call.id, rest)
     }).catch(() => undefined)
     void snap($, call.id, 'ready')
-    void recordVerdict($, call.id)
+    void recordVerdict($, call.id, token)
   }
+}
+
+/**
+ * A validate or dry_run call's operation, filled in with the schema (its
+ * descriptions and types for the cards) by the mod's own cached search and
+ * introspect reads, under the same guard as an execute's analysis. The
+ * call's own answer stands whatever happens. Every readable lookup can get
+ * a Haiku headline once its schema/check facts are available.
+ */
+async function analyseLookup($: EngineInterface, call: InspectedCall, token = generation) {
+  const ir = call.ir
+  const access = accessFromIR(ir)
+  const checks = ir.checks ?? { policy: 'skipped' as const, validation: 'skipped' as const, schema: 'skipped' as const }
+  const own = { ...(ir.validation !== undefined && { validation: ir.validation }), ...(access !== undefined && { access }), checks }
+  // Left as the answer had it: its state from its own validation and policy, the schema not read.
+  const fallback = (error?: unknown) => annotate(ir, { ...own, checks: error === undefined ? own.checks : appendCheckContext({ ...own.checks, schema: 'failed' }, [checkFailureContext('schema', { kind: 'call' }, error)]), isIncomplete: true, ...(ir.services !== undefined && { services: ir.services }), ...(ir.service !== undefined && { scope: ir.service }) })
+  let done = ir
+  const started = await $.clock.now()
+  if (isOperationLookup(call.tool!)) {
+    try {
+      done = await withinStep($, 'Agent Services', enrichSchema(gasCaller($, call.server, token), cacheForServer(caches, call.server), ir, own))
+      if (done.state === 'analyzing') done = fallback()
+    } catch (error) {
+      done = fallback(error)
+    }
+  }
+  await updateForGeneration($, token, current => patchIR(current, call.id, done)).catch(() => undefined)
+  void snap($, call.id, 'enriched')
+  try {
+    if (call.found?.unreadable === undefined && call.found?.error === undefined && call.found?.typeKind !== 'absent' && done.state !== 'unparseable' && done.summary === undefined) {
+      await summarize($, { ...call, ir: done }, (await $.clock.now()) - started, token)
+    }
+  } catch {
+    // The factual lookup headline stays when Haiku cannot explain the answer.
+  } finally {
+    await updateForGeneration($, token, current => {
+      const latest = findCall(current, call.id)
+      if (latest?.ir.isSummarizing !== true) return current
+      const { isSummarizing: _done, ...rest } = latest.ir
+      return patchIR(current, call.id, rest)
+    }).catch(() => undefined)
+  }
+  void recordVerdict($, call.id, token)
 }
 
 /**
@@ -418,7 +663,10 @@ async function analyse($: EngineInterface, call: InspectedCall) {
  * tick, its own dispatch, apart from the tool.call hook and its dialog.
  */
 async function pump($: EngineInterface) {
+  if (observations.paused) return
+  const token = generation
   let state = await readCalls($)
+  if (token !== generation) return
   // Pending calls whose hook went with an older instance settle as interrupted: they can hold the pane no longer.
   const orphans = state.queue.filter(call => call.owner !== INSTANCE)
   if (orphans.length > 0) {
@@ -426,6 +674,7 @@ async function pump($: EngineInterface) {
     // No hook is left to end their spinner text.
     for (const orphan of orphans) endSpinner($, orphan.id)
   }
+  if (token !== generation) return
   const all = [...state.queue, ...(state.last === null ? [] : [state.last]), ...state.history]
   // Forget calls that left the state, so the set stays bounded.
   const live = new Set(all.map(call => call.id))
@@ -438,44 +687,25 @@ async function pump($: EngineInterface) {
   }
 }
 
-/** The verdict line (src/view/notice.ts) of each Agent Services execute call among a row's calls, in order. */
-async function verdictsOf($: EngineInterface, calls: readonly { tool: string; tool_use_id?: string }[]): Promise<string[]> {
-  const ids: string[] = []
-  for (const call of calls) {
-    const id = call.tool_use_id
-    if (id === undefined) continue
-    // A recorded verdict is an Agent Services call's: no server lookup.
-    if (verdicts.has(id)) {
-      ids.push(id)
-      continue
-    }
-    const server = EXECUTE_TOOL.test(call.tool) ? splitMcpTool(call.tool)?.server : undefined
-    if (server !== undefined && (await isGasServer($, server))) ids.push(id)
-  }
+/** The verdict line (src/view/notice.ts) of each Agent Services call among a row's calls, in order. */
+async function verdictsOf($: EngineInterface, rows: readonly { tool: string; tool_use_id?: string }[]): Promise<string[]> {
+  const ids = rows.flatMap(row => row.tool_use_id !== undefined && (verdicts.has(row.tool_use_id) || GAS_TOOL.test(row.tool)) ? [row.tool_use_id] : [])
   if (ids.length === 0) return []
-  // Settled rows read the record and so subscribe to nothing; a reload reads the kept copy once.
-  if (ids.some(id => !verdicts.has(id))) await loadVerdicts($)
-  const open = ids.filter(id => !verdicts.has(id))
-  if (open.length > 0) {
-    // Only a call still in play reads the calls state, which redraws its row as its analysis lands.
-    const state = await readCalls($)
-    for (const id of open) {
-      const call = findCall(state, id)
-      if (call !== undefined && isFinal(call)) rememberVerdict(id, verdictOf(call))
-    }
-    return ids.flatMap(id => {
-      if (verdicts.has(id)) return verdicts.get(id) ?? []
-      const call = findCall(state, id)
-      return (call === undefined ? undefined : verdictOf(call)) ?? []
-    })
-  }
-  return ids.flatMap(id => verdicts.get(id) ?? [])
+  const saved = await read($, verdictLog).catch(() => ({} as Record<string, string | null>))
+  const state = await readCalls($)
+  return ids.flatMap(id => {
+    if (verdicts.has(id)) return verdicts.get(id) ?? []
+    if (Object.hasOwn(saved, id)) return saved[id] ?? []
+    const call = findCall(state, id)
+    return (call === undefined ? undefined : verdictOf(call)) ?? []
+  })
 }
 
 /** The verdict line of a call (src/view/notice.ts): with the outcome once it ran. */
 const verdictOf = (call: InspectedCall) => {
+  if (!isExecute(call)) return lookupNoticeOf(call) ?? null
   // Lead with trust-rule attribution and avoid repeating the checkmark.
-  const trusted = trustVerdictOf(call.trust)
+  const trusted = trustVerdictOf(call.trust, call.status)
   const notice = noticeOf(call.ir, call.status === 'ran' ? call.outcome : undefined)
   const parts = [trusted, trusted !== undefined && notice?.startsWith('✓ ') === true ? notice.slice(2) : notice].filter(part => part !== undefined)
   return parts.length === 0 ? null : parts.join(' · ')
@@ -486,7 +716,6 @@ const verdictOf = (call: InspectedCall) => {
 // the history. Mirrored in $.state (`verdicts`) so a reload keeps it.
 const VERDICTS_MAX = 500
 const verdicts = new Map<string, string | null>()
-let verdictsLoad: Promise<void> | undefined
 const verdictLog = atom({ plugin: 'graphos-agent-mods', key: 'verdicts' } as const, {})
 
 function rememberVerdict(id: string, text: string | null) {
@@ -499,31 +728,22 @@ function rememberVerdict(id: string, text: string | null) {
   }
 }
 
-/** Reads the kept record into memory once per instance; what memory has already wins. */
-function loadVerdicts($: EngineInterface): Promise<void> {
-  verdictsLoad ??= read($, verdictLog).then(
-    log => {
-      for (const [id, text] of Object.entries(log)) if (!verdicts.has(id) && (typeof text === 'string' || text === null)) rememberVerdict(id, text)
-    },
-    () => undefined,
-  )
-  return verdictsLoad
-}
-
 /**
  * Records call `id`'s verdict once it is final (src/queue.ts isFinal), in
  * memory and in $.state. Called where a call settles and where its analysis
  * ends, never while drawing. Best effort.
  */
-async function recordVerdict($: EngineInterface, id: string) {
+async function recordVerdict($: EngineInterface, id: string, token: number) {
+  if (token !== generation) return
   try {
     const call = findCall(await readCalls($), id)
-    if (call === undefined || !isFinal(call)) return
+    if (token !== generation || call === undefined || !isFinal(call)) return
     const text = verdictOf(call)
+    if (token !== generation) return
     rememberVerdict(id, text)
-    rememberResultBlock(id, resultBlockOfCall(call))
+    if (call.status !== 'ran' || call.outcome !== undefined) rememberResultBlock(id, resultBlockOfCall(call))
     await update($, verdictLog, log => {
-      if (log[id] === text) return log
+      if (token !== generation || log[id] === text) return log
       const { [id]: _replaced, ...rest } = log
       const kept = Object.entries(rest).slice(-(VERDICTS_MAX - 1))
       return { ...Object.fromEntries(kept), [id]: text }
@@ -560,18 +780,17 @@ const resultBlockOfCall = (call: InspectedCall): ResultBlock | null => (call.sta
  * it settles), else from the calls state, which redraws the row as the call lands.
  */
 async function resultBlockOfRow($: EngineInterface, tool: string, id: string): Promise<ResultBlock | undefined> {
+  if (!GAS_TOOL.test(tool)) return undefined
+  // Only final, complete blocks enter this cache. Provisional rows subscribe
+  // below until evidence arrives; completed rows avoid unrelated redraws.
   if (resultBlocks.has(id)) return resultBlocks.get(id) ?? undefined
-  const server = splitMcpTool(tool)?.server
-  if (server === undefined || !(await isGasServer($, server))) return undefined
   const call = findCall(await readCalls($), id)
   // A call that left the state (a long session, a reload) has nothing to read again: recorded, so the row stops listening to the calls state.
   if (call === undefined) {
-    rememberResultBlock(id, null)
     return undefined
   }
   if (!isFinal(call)) return undefined
   const block = resultBlockOfCall(call)
-  rememberResultBlock(id, block)
   return block ?? undefined
 }
 
@@ -607,7 +826,7 @@ function verdictLines(Box: Kit['Box'], Text: Kit['Text'], texts: string[]): Rend
           <Text dimColor>{'⎿  GraphOS Inspector  '}</Text>
           {parts.map(part => {
             const glyph = part.slice(0, 1)
-            const tone = glyph === '⚑' ? COLOR.deny : glyph === '✓' ? COLOR.allow : undefined
+            const tone = glyph === '⚑' ? 'error' : glyph === '✓' ? 'success' : undefined
             return tone === undefined ? <Text>{part}</Text> : <Text><Text color={tone}>{glyph}</Text>{part.slice(1)}</Text>
           })}
         </Text>
@@ -657,12 +876,19 @@ async function draftPrompt($: EngineInterface, draft: string, what = 'the access
 }
 
 async function isGasServer($: EngineInterface, server: string, options: { isFresh?: boolean } = {}): Promise<boolean> {
+  const token = generation
   if (servers?.has(server)) return true
   const now = await $.clock.now().catch(() => undefined)
   const missedAt = misses.get(server)
   if (options.isFresh !== true && now !== undefined && missedAt !== undefined && now - missedAt < SERVERS_TTL_MS) return false
-  listing ??= $.tool.list().then(gasServers).finally(() => (listing = undefined))
+  if (token !== generation) return false
+  if (listing === undefined) {
+    const pending = $.tool.list().then(gasServers)
+    listing = pending
+    void pending.finally(() => { if (listing === pending) listing = undefined }).catch(() => undefined)
+  }
   const found = await listing
+  if (token !== generation) return false
   servers = found
   if (found.has(server)) misses.delete(server)
   else if (now !== undefined) misses.set(server, now)
@@ -687,6 +913,388 @@ function inspectedCall(
   const { operation, variables } = adapted.input
   const shownVariables = Object.keys(variables).length === 0 ? '' : JSON.stringify(variables, null, 2)
   return { ...base, operation, variables: shownVariables, ir: buildIR(e.tool_use_id, normalize(operation, variables)) }
+}
+
+/** The tool's own arguments of a tool.call or tool.check event: the keys beside them (the tool, the call's id, its loop) left out. */
+function inputOf(e: Record<string, unknown>): Record<string, unknown> {
+  const { tool: _tool, tool_use_id: _id, agentId: _agent, consent: _consent, ...input } = e
+  return input
+}
+
+/**
+ * Records a call as it arrives, before the dialog: settling the calls an
+ * older instance left pending (a reload or a respawn took their hook
+ * mid-dialog), then waking the pump to start its analysis beside the dialog.
+ */
+async function arriveCall($: EngineInterface, call: InspectedCall, token: number) {
+  const orphans = (await readStoredCalls($)).queue.filter(one => one.owner !== INSTANCE).map(one => one.id)
+  if (token !== generation) return
+  await update($, pumper, current => token === generation ? INSTANCE : current)
+  if (token !== generation) return
+  await updateCalls($, state => {
+    const arrived = arrive(settleOrphans(state, INSTANCE), call)
+    const terminal = observations.getTerminal(call.id)
+    const status = terminal?.status ?? (observations.getArrival(call.id)?.interrupted === true ? 'interrupted' : undefined)
+    return status === undefined ? arrived : settle(arrived, call.id, status)
+  }, token, true)
+  if (token !== generation) return
+  for (const id of orphans) endSpinner($, id)
+  if (!observations.paused) wake($)
+}
+
+/**
+ * Starts the pump now (no wait: the timer is set at once): on the session's
+ * `$`, else, with no session.start in this instance (a reload or a /clear
+ * skips it), on this call's `$`, which has seen the call's own writes.
+ */
+function wake($: EngineInterface) {
+  try {
+    if (wakePump !== undefined) wakePump()
+    else startPump($)
+  } catch {
+    // The session's `$` is gone (a throw here would leave the call pending with no hook to settle it).
+    wakePump = undefined
+    startPump($)
+  }
+}
+
+/**
+ * Settles call `id`, keeping a person who stepped back on the call they
+ * chose: the stable call id survives every settlement and history insertion.
+ */
+async function settleShown($: EngineInterface, id: string, status: Exclude<InspectedCall['status'], 'pending'>, token = generation): Promise<InspectorCalls> {
+  const state = await updateCalls($, current => settle(current, id, status), token, true)
+  if (generation !== token) return state
+  const owner = await read($, pumper)
+  if (owner !== '' && owner !== INSTANCE) return state
+  await update($, callDetailIndex, current => token === generation && current.writer === INSTANCE && current.active === id ? { ...current, active: null } : current)
+  const ui = await readUi($)
+  await update($, calls, current => generation === token ? settleStoredCalls(normalizeStoredCalls(current), id, status, ui.selection) : normalizeStoredCalls(current))
+  return state
+}
+
+/** A lookup (search, introspect, validate, dry_run) as it arrives: its input read, its operations parsed, nothing asked of Agent Services. */
+function lookupCall(e: Args<'tool.call'>, server: string, tool: LookupTool, arrivedAt: number, plugin: string | undefined): { call: InspectedCall; adapted: AdaptedLookup } {
+  const adapted = adaptLookup(tool, inputOf(e))
+  const agent = e.agentId === undefined && plugin === undefined ? undefined : { ...agentOf(e.agentId ?? ''), ...(plugin !== undefined && { plugin }) }
+  const call: InspectedCall = {
+    id: e.tool_use_id,
+    server,
+    tool,
+    input: adapted.input,
+    status: 'pending',
+    owner: INSTANCE,
+    arrivedAt,
+    operation: adapted.operation,
+    variables: adapted.variables,
+    ...(adapted.error !== undefined && { inputError: adapted.error }),
+    ...(agent !== undefined && { agent }),
+    ir: pendingIR(e.tool_use_id, tool, adapted),
+  }
+  return { call, adapted }
+}
+
+/** Reads a lookup's detached answer only after the engine has received it. */
+async function observeLookupResult($: EngineInterface, e: Args<'tool.call'>, server: string, tool: LookupTool, plugin: string | undefined, ran: NextResult<'tool.call'>, token: number) {
+  const { call, adapted } = lookupCall(e, server, tool, 0, plugin)
+  const id = call.id
+  const status = statusOf(ran)
+  if (status === 'ran') {
+    const stood = ran.deny === undefined ? truncationOf(ran.text) ?? truncationOf(ran.result) : undefined
+    let result = pickResult(ran.text, ran.result)
+    let isPersisted = false
+    if (stood?.path !== undefined) {
+      // Read the saved copy back: only a path Claude Code saved (src/result.ts), bounded.
+      try {
+        const saved = await $.fs.read(stood.path)
+        if (saved.length <= MAX_SAVED) {
+          result = saved
+          isPersisted = true
+        }
+      } catch {
+        // Unreadable here: the pane says what the stand-in says.
+      }
+    }
+    const text = typeof result === 'string' ? result : JSON.stringify(result ?? '')
+    // Claude read a preview only of an answer Claude Code saved to a file.
+    const bytes = isPersisted || stood !== undefined ? 0 : utf8Bytes(text)
+    const settled = settledLookup(id, tool, adapted, responseIn(result), bytes, text)
+    const found = { ...settled.found, ...((isPersisted || stood !== undefined) && { isPersisted: true }) }
+    // An operation the schema can fill in waits for the pump, its own answer shown meanwhile.
+    const isReadable = found.unreadable === undefined && found.error === undefined && found.typeKind !== 'absent' && settled.ir.state !== 'unparseable'
+    const ir = { ...settled.ir, ...(isOperationLookup(tool) && settled.ir.state !== 'unparseable' && { state: 'analyzing' as const }), ...(isReadable && { isSummarizing: true }) }
+    await updateCalls($, state => patchLookup(state, id, found, ir), token, true)
+    if (!observations.paused && (ir.state === 'analyzing' || ir.isSummarizing === true)) wake($)
+  } else {
+    // A failed lookup says Agent Services' error; a refused one has the engine's own words.
+    const result = pickResult(ran.text, ran.result)
+    const said = typeof result === 'string' ? result : JSON.stringify(result ?? '')
+    const error = status === 'errored' ? lookupErrorOf(responseIn(result), said) : undefined
+    let ir = restingIR(call.ir)
+    if (status === 'errored') {
+      const check = tool === 'dry_run' ? 'policy' : tool === 'validate' ? 'validation' : 'schema'
+      ir = { ...ir, checks: appendCheckContext({ policy: 'skipped', validation: 'skipped', schema: 'skipped', [check]: 'failed' }, [checkFailureContext(check, { kind: 'call' }, new Error(error ?? 'the tool call failed'), 'tool-response', tool)]) }
+    }
+    await updateCalls($, state => patchLookup(state, id, { bytes: 0, ...(error !== undefined && { error }) }, ir), token, true)
+  }
+  await recordVerdict($, id, token)
+}
+
+type ObservationArrival = { plugin?: string; trust?: Fit; interrupted?: boolean } & (
+  | { inputUnavailable?: false; event: Args<'tool.call'> }
+  | { inputUnavailable: true; event: Pick<Args<'tool.call'>, 'tool' | 'tool_use_id'> }
+)
+type ObservationTerminal =
+  | { kind: 'result'; status: Exclude<InspectedCall['status'], 'pending'>; ran: NextResult<'tool.call'> }
+  | { kind: 'errored' | 'interrupted' | 'unavailable'; status: Exclude<InspectedCall['status'], 'pending'> }
+const observations = new ObservationQueue<ObservationArrival, ObservationTerminal>()
+let observerTimer: Timer | undefined
+let observerBusy = false
+let wakeObserver: (() => void) | undefined
+let notifyObserver: (() => void) | undefined
+let sessionDetailsNeedClearing = false
+let sessionObservation: { token: number; run: () => Promise<void> } | undefined
+
+/** Queue payloads are detached JSON. Engine handles and forwarding closures stay outside it. */
+function observeCall($: EngineInterface, e: Args<'tool.call'>, origin: string): boolean {
+  try {
+    // The host stamps origin per dispatch. Equal tool inputs can belong to separate callers.
+    if (origin === $.plugin.name) return false
+    const admitted = observations.admit(e.tool_use_id, { event: e, plugin: pluginOf(origin) }, () => ({ event: { tool: e.tool, tool_use_id: e.tool_use_id }, plugin: pluginOf(origin), inputUnavailable: true }))
+    scheduleObservation($)
+    if (!admitted) $.ui.invalidate('ui.render')
+    return admitted
+  } catch { return false }
+}
+
+function finishObservation($: EngineInterface, id: string, terminal: ObservationTerminal) {
+  try {
+    observations.finish(id, terminal, { kind: 'unavailable', status: terminal.status })
+    scheduleObservation($)
+  } catch { /* Observing the answer cannot affect its delivery. */ }
+}
+
+function observeTrust($: EngineInterface, id: string, evidence: Fit, token: number) {
+  if (token !== generation) return
+  if (observations.updateArrival(id, arrival => ({ ...arrival, trust: evidence }))) scheduleObservation($)
+}
+
+/** A host clock dispatch has fresh state visibility; never drain inside tool.call. */
+function scheduleObservation($: EngineInterface) {
+  wakeObserver = () => scheduleObservation($)
+  notifyObserver = () => $.ui.invalidate('ui.render')
+  if (observerBusy || observerTimer !== undefined) return
+  try {
+    observerTimer = $.clock.after(1, () => {
+      observerTimer = undefined
+      void drainObservations($).catch(() => undefined)
+    })
+  } catch { observations.setPaused(true) }
+}
+
+async function observeJob($: EngineInterface, job: ObservationJob<ObservationArrival, ObservationTerminal>, token: number): Promise<boolean> {
+  const { event: e, plugin, inputUnavailable } = job.arrival
+  const split = splitMcpTool(e.tool)
+  const server = split?.server
+  if (server === undefined) return false
+  const lookup = lookupToolOf(split?.tool ?? '')
+  if (job.phase === 'arrival') {
+    if (!await isGasServer($, server, { isFresh: true }) || token !== generation) return false
+    const arrivedAt = await $.clock.now()
+    if (token !== generation) return false
+    if (inputUnavailable === true) {
+      if (!await ensureCallWriter($) || token !== generation) return false
+      const terminal = observations.getTerminal(job.id)
+      await update($, calls, current => {
+        const stored = normalizeStoredCalls(current)
+        if (token !== generation || stored.writer !== INSTANCE) return stored
+        const overview = { id: job.id, server, status: 'pending' as const, owner: INSTANCE, arrivedAt, details: 'oversize' as const, ...(lookup !== undefined && { tool: lookup }), overview: { headline: 'Call input exceeded the retained-detail size limit.', headlineSource: 'derived' as const } }
+        const added = { ...stored, queue: [...stored.queue.filter(one => one.id !== job.id), overview] }
+        const status = terminal?.status ?? (observations.getArrival(job.id)?.interrupted === true ? 'interrupted' : undefined)
+        return status === undefined ? added : settleStoredCalls(added, job.id, status, { kind: 'live' })
+      })
+      return token === generation
+    }
+    let call = lookup === undefined ? inspectedCall(e, server, arrivedAt, plugin) : lookupCall(e, server, lookup, arrivedAt, plugin).call
+    const trust = observations.getArrival(job.id)?.trust
+    if (trust !== undefined) call = { ...call, trust }
+    await arriveCall($, call, token)
+    if (token !== generation) return false
+    if (!observations.paused) {
+      void snap($, job.id, 'arrive')
+      void showArrival($, { isLookup: lookup !== undefined })
+      if (e.agentId !== undefined) void resolveAgent($, job.id, e.agentId, plugin)
+    }
+  } else if (job.phase === 'update') {
+    if (observations.getArrival(job.id)?.interrupted === true && observations.getTerminal(job.id) === undefined) {
+      await settleShown($, job.id, 'interrupted', token)
+      if (token !== generation) return false
+      endSpinner($, job.id)
+    }
+    if (inputUnavailable === true) return true
+    const trust = observations.getArrival(job.id)?.trust
+    if (trust !== undefined) await updateCalls($, state => patchTrust(state, job.id, trust), token, true)
+  } else {
+    const terminal = observations.getTerminal(job.id)
+    if (terminal === undefined) return false
+    await settleShown($, job.id, terminal.status, token)
+    if (token !== generation) return false
+    endSpinner($, job.id)
+    if (inputUnavailable === true) return token === generation
+    if (terminal.kind === 'result') {
+      if (lookup === undefined) await observeExecuteResult($, e, server, plugin, terminal.ran, token)
+      else await observeLookupResult($, e, server, lookup, plugin, terminal.ran, token)
+    } else {
+      // No answer is retained after abort, throw, or a bounded-payload fallback.
+      const state = await readCalls($)
+      const call = findCall(state, job.id)
+      if (call !== undefined) await updateCalls($, current => {
+        const ir = restingIR(call.ir)
+        return patchIR(current, job.id, terminal.kind === 'unavailable' ? { ...ir, checks: { ...(ir.checks ?? { policy: 'skipped', validation: 'skipped', schema: 'skipped' }), error: 'Result preview was not retained because it exceeded the Inspector’s response retention limit.' } } : ir)
+      }, token, true)
+      await recordVerdict($, job.id, token)
+    }
+    if (!observations.paused) void snap($, job.id, 'settled')
+  }
+  return token === generation
+}
+
+/** One active drain owns its writer until it really settles, including across /clear. */
+async function drainObservations($: EngineInterface) {
+  if (observerBusy) return
+  observerBusy = true
+  const drainGeneration = generation
+  let didObserve = false
+  try {
+    while (true) {
+      const pendingSession = sessionObservation
+      const job = pendingSession === undefined ? observations.take() : undefined
+      if (pendingSession === undefined && job === undefined) break
+      const token = generation
+      const watchdog = $.clock.after(1_000, () => {
+        observations.setPaused(true)
+        try { $.ui.invalidate('ui.render') } catch { /* No UI host. */ }
+      })
+      try {
+        if (pendingSession !== undefined) {
+          sessionObservation = undefined
+          if (pendingSession.token === generation) await pendingSession.run()
+        } else if (job !== undefined) {
+          didObserve = true
+          if (await observeJob($, job, token)) observations.complete(job)
+          else observations.discard(job)
+        }
+      } catch {
+        if (job !== undefined) {
+          // Best effort terminal repair after a failed parser or host operation.
+          const terminal = observations.getTerminal(job.id)
+          if (terminal !== undefined && token === generation) await settleShown($, job.id, terminal.status, token).catch(() => undefined)
+          observations.discard(job)
+        }
+      } finally {
+        watchdog.cancel()
+      }
+      // A retired dispatch must not run a new session's setup on its stale frame.
+      if (drainGeneration !== generation) break
+    }
+  } finally {
+    observerBusy = false
+    const wasPaused = observations.paused
+    observations.setPaused(drainGeneration !== generation && sessionObservation !== undefined)
+    if (wasPaused !== observations.paused) try { notifyObserver?.() } catch { /* No UI host. */ }
+    if (sessionObservation !== undefined) wakeObserver?.()
+    if (didObserve && drainGeneration === generation && !observations.paused) try { wake($) } catch { /* Session host retired. */ }
+  }
+}
+
+/** Parses execute evidence independently of its forwarding hook. */
+async function observeExecuteResult($: EngineInterface, e: Args<'tool.call'>, server: string, plugin: string | undefined, ran: NextResult<'tool.call'>, token: number) {
+  if (token !== generation) return
+  await ensureLinks($)
+  if (token !== generation) return
+  const status = statusOf(ran)
+  // An errored call (refused at the dialog, or the tool failed) carries
+  // the engine's text, not a GraphQL response: no RESULT for it.
+  // An oversized result comes back as an error text naming the file Claude Code saved it to.
+  const stood = ran.deny === undefined ? truncationOf(ran.text) ?? truncationOf(ran.result) : undefined
+  if (status === 'ran') {
+    // Core relays the tool's text as `text` and its content blocks as `result`.
+    // The latest IR names fields by their real names; which scalars show is decided when drawn.
+    const current = await readCalls($)
+    if (token !== generation) return
+    const latest = [...current.queue, ...current.history].find(one => one.id === e.tool_use_id)
+    const ir = latest?.ir ?? inspectedCall(e, server, 0, plugin).ir
+    const result = pickResult(ran.text, ran.result)
+    // The site this response shows, before the rows' links are worked out from it.
+    await learnSites($, ir, result, token)
+    if (token !== generation) return
+    let outcome = outcomeOf(ir, result, linkConfig)
+    if (stood !== undefined && outcome.isUnreadable !== true) outcome = savedOutcome(outcome)
+    if (outcome.isTooLarge === true && stood?.path !== undefined) {
+      // Read the saved copy back: only a path Claude Code saved (src/result.ts), bounded.
+      try {
+        const saved = await $.fs.read(stood.path)
+        if (token !== generation) return
+        if (saved.length <= MAX_SAVED) {
+          await learnSites($, ir, saved, token)
+          if (token !== generation) return
+          const full = outcomeOf(ir, saved, linkConfig)
+          if (full.isUnreadable !== true) outcome = savedOutcome(full)
+        }
+      } catch {
+        // Unreadable here: the pane says the response was too large to preview.
+      }
+    }
+    const patched = await updateCalls($, state => patchOutcome(state, e.tool_use_id, outcome), token, true)
+    if (token !== generation) return
+    // State subscriptions redraw the result row when this detached outcome lands.
+    const done = findCall(patched, e.tool_use_id)
+    if (token === generation && done !== undefined && isFinal(done)) rememberResultBlock(e.tool_use_id, resultBlockOfCall(done))
+    void snap($, e.tool_use_id, 'outcome')
+  }
+  await recordVerdict($, e.tool_use_id, token)
+}
+
+/**
+ * An execute's permission check: a trust rule may lift its ask to allow.
+ * An existing allow or deny, an organization ceiling and the engine's verdict
+ * when matching fails all stand. A call that runs unasked names itself on the spinner.
+ */
+async function checkExecute($: EngineInterface, e: Args<'tool.check'>, verdict: NextResult<'tool.check'>, token: number): Promise<NextResult<'tool.check'>> {
+  if (token !== generation) return verdict
+  const id = e.tool_use_id
+  const server = splitMcpTool(e.tool)?.server
+  if (id === undefined) return verdict
+  if (verdict.decision === 'allow' && server !== undefined) inSpinnerOrder(() => beginSpinner($, server, id))
+  if (verdict.decision !== 'ask') return verdict
+  if ((e.ceiling !== undefined && e.ceiling !== 'allow') || (verdict.ceiling !== undefined && verdict.ceiling !== 'allow')) return verdict
+  if (server === undefined) return verdict
+  const stop = new AbortController()
+  taskStops.add(stop)
+  // One total budget after the engine answers. Evaluation has no spinner or
+  // evidence side effects, so an answer arriving after the deadline cannot
+  // claim that the original ask was allowed by a trust rule.
+  const evaluate = async (): Promise<Fit | undefined> => {
+    if (!(await isGasServer($, server)) || token !== generation) return undefined
+    await ensureTrust($)
+    if (trustRules.length === 0 || (await read($, isTrustOff)) || token !== generation) return undefined
+    return fitCall(e.input, trustRules)
+  }
+  let fit: Fit | undefined
+  try {
+    fit = await Promise.race([
+      evaluate(),
+      $.clock.sleep(1_000, { signal: stop.signal }).then(() => undefined, () => undefined),
+    ])
+  } catch { return verdict }
+  finally { stop.abort(); taskStops.delete(stop) }
+  if (token !== generation || fit === undefined) return verdict
+  const evidence = keptFit(fit)
+  observeTrust($, id, evidence, token)
+  if (!fit.isAllowed) return verdict
+  const rules = [...new Set(fit.fits.map(one => one.rule))]
+  inSpinnerOrder(() => beginSpinner($, server, id))
+  return { decision: 'allow' as const, reason: `GraphOS Inspector trust rule${rules.length === 1 ? '' : 's'} ${rules.join(', ')}` }
 }
 
 /** `~/.claude/graphos-agent-mods/<name>`, from $HOME; undefined when HOME cannot be read. */
@@ -728,10 +1336,12 @@ async function readText($: EngineInterface, path: string): Promise<string | unde
 }
 
 async function reloadLinks($: EngineInterface): Promise<{ file: string | undefined; problems: string[]; isUser: boolean }> {
+  const token = generation
   const file = await userLinksFile($)
   const user = file === undefined ? undefined : await readText($, file)
   const shipped = await readText($, `${$.plugin.root}/links.toml`)
   const loaded = loadLinkConfig({ ...(shipped !== undefined && { shipped }), ...(user !== undefined && { user }), learned: await readLearned($) })
+  if (token !== generation) return { file, problems: loaded.problems, isUser: user !== undefined }
   linkConfig = loaded.config
   baseSources = loaded.baseSources
   hasLoadedLinks = true
@@ -744,21 +1354,21 @@ async function reloadLinks($: EngineInterface): Promise<{ file: string | undefin
 // for the person's next session or their own /gas trust. The mod does watch
 // the file (watchedFiles), but only to say it changed: a save is never read,
 // let alone applied, so nothing that can write the file mid-session widens
-// what runs unasked. No file, no rules: every call asks as it always did.
+// what runs unasked. No file or rules: the engine's permission settings stand.
 let trustRules: TrustRule[] = []
 let trustLoad: Promise<TrustLoaded> | undefined
-// trust.graphql was saved since the rules in memory were read: shown in the
-// standing line until the person runs `/gas trust`.
+// trust.graphql was saved since the rules in memory were read: reported by `/gas setup`.
 let isTrustFileChanged = false
 const isTrustOff = atom({ plugin: 'graphos-agent-mods', key: 'isTrustOff' } as const, false)
 
 type TrustLoaded = { file: string | undefined; problems: string[]; isPresent: boolean }
 
 async function reloadTrust($: EngineInterface): Promise<TrustLoaded> {
+  const token = generation
   const file = await userFile($, 'trust.graphql')
   const text = file === undefined ? undefined : await readText($, file)
   const { rules, problems } = text === undefined ? { rules: [], problems: [] } : parseTrust(text)
-  trustRules = rules
+  if (token === generation) trustRules = rules
   return { file, problems, isPresent: text !== undefined }
 }
 
@@ -772,66 +1382,6 @@ function ensureTrust($: EngineInterface): Promise<TrustLoaded> {
 function keptFit(fit: Fit): Fit {
   if (!fit.isAllowed) return { isAllowed: false, reason: fit.reason.slice(0, 2_000) }
   return { isAllowed: true, fits: fit.fits.slice(0, 50).map(one => ({ root: one.root.slice(0, 300), rule: one.rule.slice(0, 300), reasons: one.reasons.map(reason => reason.slice(0, 600)) })) }
-}
-
-// The standing line under the prompt (src/view/status.ts), pushed where the
-// state it counts changes (a call arriving or settling, trust rules loading,
-// switching or being reloaded) and never on a timer. Sent only when its text
-// changed, and one send after another, so an older line never lands over a newer.
-let shownStatus: string | undefined
-let statusChain: Promise<void> = Promise.resolve()
-
-/**
- * What the caller has just written: a dispatch's `$` reads one moment, so it cannot read its own write back.
- * `isReadingRules: false` keeps the line from reading trust.graphql for the rule count: reporting that the file
- * was saved must never be what reads it.
- */
-type KnownFacts = { tally?: { calls: number; unasked: number; bytes?: number }; isTrustOff?: boolean; isReadingRules?: boolean }
-// `/gas trust off`, as the last command left it: the atom is the record, this is what a long-lived dispatch's `$` cannot read back.
-let isTrustOffNow: boolean | undefined
-
-function showStatus($: EngineInterface, known: KnownFacts = {}): Promise<void> {
-  statusChain = statusChain
-    .then(async () => {
-      // A reloaded module has not read the rules yet: the line must not forget them.
-      if (known.isReadingRules !== false) await ensureTrust($)
-      const counted = known.tally ?? (await read($, tally))
-      const isOff = known.isTrustOff ?? isTrustOffNow ?? (await read($, isTrustOff))
-      const text = statusLine({ calls: counted.calls, unasked: counted.unasked, bytes: counted.bytes ?? 0, rules: trustRules.length, isTrustOff: isOff, isTrustFileChanged })
-      if (text === shownStatus) return
-      $.ui.status(text)
-      // Only once it was sent: a send that threw is tried again with the next change.
-      shownStatus = text
-    })
-    .catch(() => undefined)
-  return statusChain
-}
-
-/** One more Agent Services call this session; the line follows. Never rejects. */
-async function countCall($: EngineInterface) {
-  try {
-    await showStatus($, { tally: await update($, tally, counted => ({ ...counted, calls: counted.calls + 1 })) })
-  } catch {
-    // The line is a convenience.
-  }
-}
-
-/** A response Claude read, `bytes` of it (src/weight.ts); the line follows. Never rejects. */
-async function countRead($: EngineInterface, bytes: number) {
-  try {
-    await showStatus($, { tally: await update($, tally, counted => ({ ...counted, bytes: (counted.bytes ?? 0) + bytes })) })
-  } catch {
-    // The line is a convenience.
-  }
-}
-
-/** One more call that ran with no dialog because it fit a trust rule (its `trust.isAllowed`); the line follows. Never rejects. */
-async function countUnasked($: EngineInterface) {
-  try {
-    await showStatus($, { tally: await update($, tally, counted => ({ ...counted, unasked: counted.unasked + 1 })) })
-  } catch {
-    // The line is a convenience.
-  }
 }
 
 // The spinner's text while an Agent Services call runs. Only a call that runs with no
@@ -849,17 +1399,19 @@ const endedSpinners = new Set<string>()
 const ENDED_SPINNERS_MAX = 200
 
 function inSpinnerOrder(work: () => Promise<unknown>) {
-  spinnerChain = spinnerChain.then(work).then(() => undefined, () => undefined)
+  const token = generation
+  spinnerChain = spinnerChain.then(() => token === generation ? work() : undefined).then(() => undefined, () => undefined)
 }
 
 /** The call `id` runs now, unasked: the spinner reads its headline, else `Agent Services · <operation name>`. */
 async function beginSpinner($: EngineInterface, server: string, id: string) {
+  const token = generation
   if (!(await isGasServer($, server))) return
   const call = findCall(await readCalls($), id)
   if (call === undefined) return
   const text = spinnerTextOf(call.ir)
   // Decided as it is written: an end asked for before now wins.
-  await update($, spinner, current => (endedSpinners.has(id) ? current : { id, text }))
+  await update($, spinner, current => (token !== generation || endedSpinners.has(id) ? current : { id, text }))
 }
 
 /** The headline of call `id` has landed: the spinner reads it, if the call is still the one it names. */
@@ -910,11 +1462,12 @@ async function openLink($: EngineInterface, url: unknown) {
  * does not know the agent. Best effort, never rejects.
  */
 async function resolveAgent($: EngineInterface, callId: string, agentId: string, plugin: string | undefined) {
+  const token = generation
   try {
     const info = (await withinStep($, 'the agent list', $.agent.list(), AGENT_LIST_MS)).find(one => one.id === agentId)
     if (info === undefined) return
     const agent = { ...agentOf(agentId, info), ...(plugin !== undefined && { plugin }) }
-    await updateCalls($, state => patchAgent(state, callId, agent))
+    await updateForGeneration($, token, state => patchAgent(state, callId, agent))
     void snap($, callId, 'agent')
   } catch {
     // The line says `from subagent` and no more.
@@ -925,19 +1478,35 @@ async function resolveAgent($: EngineInterface, callId: string, agentId: string,
 const AGENT_LIST_MS = 5_000
 
 /**
- * The pane's side of a call arriving: back to live (CLOSED has cursor: null),
+ * The pane's side of a call arriving: keep its stable selection,
  * the raw pane retitled, and the pane opened once unasked. Runs beside the
  * permission dialog, never ahead of it; best effort, never rejects.
  */
-async function showArrival($: EngineInterface) {
+async function showArrival($: EngineInterface, _options: { isLookup?: boolean } = {}) {
+  // Stable selections survive every arrival; only a real permission dialog moves them.
+  await retitleRaw($)
+}
+
+/**
+ * The pane opens on its own when a call it inspects waits at a permission
+ * dialog, whatever the tool: the person sees what they are approving. Once a
+ * session (a pane they closed stays closed), and never for a call that runs
+ * without asking. Unasked, the engine seats a pane only where it can dock
+ * (144 columns). Best effort, never rejects.
+ */
+async function openForDialog($: EngineInterface, id: string, token: number) {
+  if (token !== generation) return
   try {
-    await update($, paneUi, () => CLOSED)
+    await update($, paneUi, current => token === generation ? { ...CLOSED, selection: { kind: 'call' as const, id } } : current)
+    if (token !== generation) return
+    await update($, callDetailIndex, current => token === generation && current.writer === INSTANCE ? { ...current, active: id } : current)
     await retitleRaw($)
-    // Unasked, the engine seats a pane only where it can dock (144 columns).
-    if (!(await read($, hasAutoOpened))) {
-      const opened = await $.ui.open({ id: PANE, title: TITLE, columns: DOCK_COLUMNS })
-      if (opened.isPlaced) await update($, hasAutoOpened, () => true)
-    }
+    if (token !== generation || await read($, hasAutoOpened)) return
+    // Register Raw first, then raise Inspector without taking the composer's keys.
+    await $.ui.open({ id: RAW_PANE, title: `Raw · ${rawTitleOf(await shownCall($))}`, columns: DOCK_COLUMNS }).catch(() => undefined)
+    if (token !== generation) return
+    const opened = await $.ui.open({ id: PANE, title: TITLE, columns: DOCK_COLUMNS })
+    if (opened.isPlaced) await update($, hasAutoOpened, current => token === generation ? true : current)
   } catch {
     // No pane host here (a test engine, `-p`); /gas still works where there is one.
   }
@@ -1020,8 +1589,9 @@ async function setupText($: EngineInterface): Promise<string> {
 }
 
 async function ensureLinks($: EngineInterface) {
+  const token = generation
   if (!hasLoadedLinks) await reloadLinks($).catch(() => undefined)
-  hasLoadedLinks = true
+  if (token === generation) hasLoadedLinks = true
 }
 
 let learning: Promise<void> = Promise.resolve()
@@ -1034,11 +1604,12 @@ let learning: Promise<void> = Promise.resolve()
  * the site it taught. Best effort: never rejects, and a response that teaches
  * nothing costs one look at which bases are unset.
  */
-function learnSites($: EngineInterface, ir: CallIR, result: unknown): Promise<void> {
-  learning = learning.then(() => learnFrom($, ir, result)).catch(() => undefined)
+function learnSites($: EngineInterface, ir: CallIR, result: unknown, token = generation): Promise<void> {
+  learning = learning.then(() => token === generation ? learnFrom($, ir, result, token) : undefined).catch(() => undefined)
   return learning
 }
-async function learnFrom($: EngineInterface, ir: CallIR, result: unknown) {
+async function learnFrom($: EngineInterface, ir: CallIR, result: unknown, token: number) {
+  if (token !== generation) return
   // The cheap gate: nothing is parsed unless a base a response can teach is still unset.
   const wanted = learnable(baseSources)
   if (wanted.length === 0) return
@@ -1046,8 +1617,14 @@ async function learnFrom($: EngineInterface, ir: CallIR, result: unknown) {
   const fresh = wanted.filter(site => found[site] !== undefined)
   if (fresh.length === 0) return
   const before = linkConfig.bases
-  await $.store.set(LEARNED_KEY, { ...(await readLearned($)), ...Object.fromEntries(fresh.map(site => [site, found[site]])) })
+  const learned = await readLearned($)
+  if (token !== generation) return
+  // The store has no compare-and-set or cancellation: an already issued write
+  // may finish after retirement. Fence every subsequent effect at the boundary.
+  await $.store.set(LEARNED_KEY, { ...learned, ...Object.fromEntries(fresh.map(site => [site, found[site]])) })
+  if (token !== generation) return
   await reloadLinks($)
+  if (token !== generation) return
   const hosts = fresh.filter(site => linkConfig.bases[site] !== before[site]).map(site => escapeText(hostOf(linkConfig.bases[site] ?? ''), 100).text)
   if (hosts.length > 0) $.ui.log(`GraphOS Inspector: record links now open on ${hosts.join(' and ')}, learned from an Agent Services response. /gas links says where each site comes from.`)
 }
@@ -1095,38 +1672,107 @@ async function linksSaved($: EngineInterface) {
 /**
  * trust.graphql was saved. It is not read: the rules in memory stand until the
  * person runs `/gas trust`, so a rule an agent writes into it mid-session
- * cannot take effect on its own. The person is told once per change (the
- * standing line keeps saying it), and how to apply it.
+ * cannot take effect on its own. The person is told once per change how to apply it.
  */
 function trustSaved($: EngineInterface) {
   const isNew = !isTrustFileChanged
   isTrustFileChanged = true
-  // Said without reading the file: this instance may not have read it yet, and a save is not what loads it.
-  void showStatus($, { isReadingRules: false })
   if (isNew) $.ui.log('GraphOS Inspector: trust.graphql changed. Run /gas trust to reload it; until then, the rules loaded earlier stand.')
 }
 
+async function applyPaneChange($: EngineInterface, change: PaneChange, drawnCallId?: string) {
+  const token = generation
+  const state = await readDisplayCalls($)
+  const ui = await readUi($)
+  const shown = shownResolvedAt(state, ui.selection).call
+  const expected = change.expectedCallId ?? change.detail?.callId ?? drawnCallId
+  if (expected !== undefined && shown?.id !== expected) return
+  const { toggleRaw: isRawToggle, openUrl: url, draftPrompt: draft, expectedCallId: _expected, ...patch } = change
+  if (isRawToggle === true) await toggleRaw($)
+  if (url !== undefined) void openLink($, url)
+  if (draft !== undefined) void draftPrompt($, draft)
+  if (Object.keys(patch).length === 0) return
+  const isOpening = patch.field != null || patch.arg != null || patch.row != null || patch.more != null || patch.detail != null || patch.rawPage !== undefined || patch.rawAsSent !== undefined
+  const updated = await update($, paneUi, current => {
+    if (token !== generation) return current
+    const selection = normalizeSelection(current, { ...EMPTY_STORED, history: state.history.map(call => isFullCall(call) ? overviewOf(call) : call) })
+    if (expected !== undefined && shownResolvedAt(state, selection).call?.id !== expected) return current
+    const base = patch.selection === undefined ? current : { ...CLOSED, selection: patch.selection }
+    return { ...base, ...patch, ...(isOpening && patch.selection === undefined && shown !== null && { selection: { kind: 'call' as const, id: shown.id } }) }
+  })
+  await retitleRaw($)
+}
+
+function clearSessionMemory() {
+  generation += 1
+  observations.clear()
+  observations.setPaused(observerBusy || pendingWrites > 0)
+  observerTimer?.cancel(); observerTimer = undefined
+  sessionObservation = undefined
+  writerClaim = undefined
+  for (const stop of taskStops) stop.abort()
+  taskStops.clear()
+  attempted.clear(); caches.clear(); summaries.clear()
+  verdicts.clear(); resultBlocks.clear()
+  servers = undefined; misses.clear(); listing = undefined
+  faulted.clear(); endedSpinners.clear()
+  trustRules = []; trustLoad = undefined
+  hasLoadedLinks = false; linkConfig = configOf()
+  if (pumpTimer !== undefined) stopPump(pumpTimer)
+  linksTimer?.cancel(); linksTimer = undefined
+  wakePump = undefined
+}
+
 export const register: Register = (on, options) => {
+  // Clear the retired footer even when hot reload preserves the host's status.
+  let hasClearedStatus = false
   // Start with shipped links; session setup loads user mappings and learned sites.
   linkConfig = configOf()
   hasLoadedLinks = false
   snapshots = snapshotOptionsOf(options)
-  on('session.start', async ($, e, next) => {
-    // Arrivals start the pump on this session's `$`, as it always ran: its dispatch is over, so its reads see every write.
-    wakePump = () => startPump($)
-    // One round picks up what a reload left analysing.
-    wakePump()
-    await ensureLinks($)
-    await ensureTrust($)
-    void showStatus($)
-    void noteVersion($).catch(() => undefined)
-    try {
-      // Immediate: the command only reads and writes the pane, so typed mid-turn it need not wait for the turn to end.
-      await $.command.register({ name: 'gas', description: 'Show the GraphOS Inspector pane for the current Agent Services call', argumentHint: '[setup|older|newer|live|raw|trust|links]', immediate: true })
-    } catch {
-      // No command host (a test engine); the pane still opens on its own.
-    }
-    return next(e)
+  on('session.start', ($, e, next) => {
+    const forwarded = next(e)
+    clearSessionMemory()
+    const token = generation
+    sessionObservation = { token, run: async () => {
+      await writes.catch(() => undefined)
+      if (token !== generation) return
+      if (!await ensureCallWriter($) || token !== generation) return
+      if (sessionDetailsNeedClearing) {
+        await clearSessionDetails($, token)
+        if (token !== generation) return
+        sessionDetailsNeedClearing = false
+      }
+      await update($, pumper, current => token === generation ? INSTANCE : current)
+      if (token !== generation) return
+      await update($, callDetailIndex, current => token === generation && current.writer === INSTANCE ? { ...current, active: null } : current)
+      if (token !== generation) return
+      await updateCalls($, current => current.queue.reduce((state, call) => settle(state, call.id, 'interrupted'), current), token, true)
+      if (token !== generation) return
+      const ui = await readUi($)
+      if (token !== generation) return
+      await update($, paneUi, current => token === generation ? ui : current)
+      if (token !== generation) return
+      $.ui.status(undefined)
+      hasClearedStatus = true
+      // Arrivals start the pump on this session's `$`, as it always ran: its dispatch is over, so its reads see every write.
+      wakePump = () => startPump($)
+      // One round picks up what a reload left analysing.
+      wakePump()
+      await ensureLinks($)
+      if (token !== generation) return
+      await ensureTrust($)
+      if (token !== generation) return
+      void noteVersion($).catch(() => undefined)
+      try {
+        // Immediate: the command only reads and writes the pane, so typed mid-turn it need not wait for the turn to end.
+        await $.command.register({ name: 'gas', description: 'Show the GraphOS Inspector pane for the current Agent Services call', argumentHint: '[setup|older|newer|live|raw|trust|links]', immediate: true })
+      } catch {
+        // No command $ (a test engine); the pane still opens on its own.
+      }
+    } }
+    scheduleObservation($)
+    return forwarded
   })
 
   // Watch the person's config files for a save: the engine's watcher takes
@@ -1178,21 +1824,18 @@ export const register: Register = (on, options) => {
     }
     if (step === 'trust' || step === 'trust on' || step === 'trust off') {
       const isOff = step === 'trust' ? await read($, isTrustOff) : await update($, isTrustOff, () => step === 'trust off')
-      isTrustOffNow = isOff
       if (step === 'trust off') {
-        void showStatus($, { isTrustOff: true })
-        return { text: 'Trust rules off for this session: every Agent Services call asks. /gas trust on turns them back on.' }
+        return { text: 'Trust rules off for this session: Agent Services calls follow your existing permission settings. /gas trust on turns them back on.' }
       }
       // What is on disk is what is loaded now: cleared before the read, so a save that lands during it is not lost.
       isTrustFileChanged = false
       trustLoad = reloadTrust($)
       const { file, problems, isPresent } = await trustLoad
-      void showStatus($, { isTrustOff: isOff })
       const where = file === undefined ? 'no rules file location (HOME is unknown)' : isPresent ? file : `${file} (not found: create it to add rules; see trust.example.graphql in ${$.plugin.root})`
-      const listed = trustRules.length === 0 ? 'No rules: every Agent Services call asks.' : `${trustRules.length} rule${trustRules.length === 1 ? '' : 's'}: an Agent Services query that fits one runs without asking.\n${describeRules(trustRules).map(line => `  ${line}`).join('\n')}`
+      const listed = trustRules.length === 0 ? 'No rules: Agent Services calls follow your existing permission settings.' : `${trustRules.length} rule${trustRules.length === 1 ? '' : 's'}: a matching query can run without asking when the organization ceiling allows it.\n${describeRules(trustRules).map(line => `  ${line}`).join('\n')}`
       const notes = problems.length === 0 ? '' : `\nSkipped: ${problems.join('; ')}`
       const state = isOff ? '\nOff for this session (/gas trust on).' : ''
-      return { text: `Trust rules reloaded from ${where}.\n${listed}${notes}${state}\nPatterns match the text, not what it means; mutations and change-named roots always ask.` }
+      return { text: `Trust rules reloaded from ${where}.\n${listed}${notes}${state}\nPatterns match the text, not what it means; trust rules never auto-approve mutations or change-named roots.` }
     }
     if (step === 'timing on' || step === 'timing off') {
       await $.store.set(TIMING_KEY, step === 'timing on')
@@ -1200,15 +1843,18 @@ export const register: Register = (on, options) => {
     }
     if (step === 'snapshot') {
       const state = await readCalls($)
-      const { call, waiting } = shownAt(state, (await read($, paneUi)).cursor)
+      const { call, waiting } = shownResolvedAt(await readDisplayCalls($), (await readUi($)).selection)
       if (call === null) return { text: 'No Agent Services call to snapshot yet.' }
+      if (!isFullCall(call)) return { text: 'Details for this call are unavailable.' }
       const widths = snapshots.widths
       const dir = await emitSnapshot($, call, waiting, 'manual', widths, true)
       return { text: `${dir === undefined ? 'Could not write the snapshot.' : `Snapshot written to ${dir}`} (automatic snapshots: ${(await isSnapshotting($)) ? 'on' : 'off'})` }
     }
     if (step === 'older' || step === 'newer' || step === 'live') {
-      const state = await readCalls($)
-      await update($, paneUi, ui => ({ ...ui, cursor: step === 'live' ? null : step === 'older' ? older(ui.cursor, state) : newer(ui.cursor) }))
+      const state = await readDisplayCalls($)
+      const ui = await readUi($)
+      const selection = step === 'live' ? { kind: 'live' as const } : step === 'older' ? selectionOlder(ui.selection, state) : selectionNewer(ui.selection, state)
+      await update($, paneUi, () => ({ ...CLOSED, selection }))
     }
     if (step === 'raw') {
       const isOpen = await toggleRaw($)
@@ -1217,151 +1863,93 @@ export const register: Register = (on, options) => {
     await retitleRaw($)
     // No holdToasts: that is for a dialog the person answers and leaves, and this pane stays docked.
     // No closeOnEscape: Esc hands the keys back and the pane stays (Esc is also how a person interrupts Claude); × or ctrl+x x closes it.
+    await $.ui.open({ id: RAW_PANE, title: `Raw · ${rawTitleOf(await shownCall($))}`, columns: DOCK_COLUMNS }).catch(() => undefined)
     const opened = await $.ui.open({ id: PANE, title: TITLE, focus: true, columns: DOCK_COLUMNS })
     return { text: opened.isPlaced ? 'GraphOS Inspector opened.' : 'GraphOS Inspector could not open here.' }
   })
 
-  on('tool.call', { tool: /^mcp__claude_ai_GraphOS_Agent_Services__execute$/ }, async ($, e, next) => {
-    const server = splitMcpTool(e.tool)?.server
-    if (server === undefined || !(await isGasServer($, server, { isFresh: true }))) return next(e)
-
-    // Before the dialog only what must be: the call recorded, so the pump
-    // and the pane can find it while the person decides.
-    // Who made it: Claude (the engine's call site) or a plugin's hook.
-    const plugin = pluginOf(next.origin?.plugin)
-    const call = inspectedCall(e, server, await $.clock.now(), plugin)
-    // A call another instance left pending (a reload or a respawn took its hook mid-dialog) can hold the pane no longer.
-    const orphans: string[] = []
-    await updateCalls($, state => {
-      // Captured as it is decided (the callback may run again on a conflict): their spinner text has no hook left to end it.
-      orphans.length = 0
-      orphans.push(...normalizeCalls(state).queue.filter(one => one.owner !== INSTANCE).map(one => one.id))
-      return arrive(settleOrphans(state, INSTANCE), call)
-    })
-    for (const id of orphans) endSpinner($, id)
-    // The pump starts its analysis beside the dialog (no wait: the timer is set at once). With no
-    // session.start in this instance (a reload can skip it), on this call's `$`, which has seen its arrival.
-    try {
-      if (wakePump !== undefined) wakePump()
-      else startPump($)
-    } catch {
-      // The session's `$` is gone (a throw here would leave the call pending with no hook to settle it).
-      wakePump = undefined
-      startPump($)
+  on('tool.call', { tool: /^mcp__claude_ai_GraphOS_Agent_Services__(?:execute|search|introspect|validate|dry_run)$/ }, async ($, e, next) => {
+    // Forward before touching discovery, storage, timers, or observation metadata.
+    let forwarded: ReturnType<typeof next>
+    try { forwarded = next(e) }
+    catch (error) {
+      observeCall($, e, next.origin.plugin)
+      finishObservation($, e.tool_use_id, { kind: 'errored', status: next.signal.aborted ? 'interrupted' : 'errored' })
+      throw error
     }
-    void snap($, call.id, 'arrive')
-    // Everything else runs beside the dialog, never ahead of it.
-    void showArrival($)
-    void countCall($)
-    if (e.agentId !== undefined) void resolveAgent($, call.id, e.agentId, plugin)
-
-    // An abort (the person's Esc, a hook above settling first) may leave next(e) unsettled: the call stops pending then.
+    const token = generation
+    const admitted = observeCall($, e, next.origin.plugin)
     const onAbort = () => {
-      void updateCalls($, state => settle(state, call.id, 'interrupted')).catch(() => undefined)
-      endSpinner($, call.id)
+      if (token === generation && admitted && observations.updateArrival(e.tool_use_id, arrival => ({ ...arrival, interrupted: true }))) scheduleObservation($)
     }
-    if (next.signal.aborted) onAbort()
-    else next.signal.addEventListener('abort', onAbort, { once: true })
-    let ran: Awaited<ReturnType<typeof next>>
+    if (admitted) {
+      if (next.signal.aborted) onAbort()
+      else next.signal.addEventListener('abort', onAbort, { once: true })
+    }
     try {
-      ran = await next(e)
+      const ran = await forwarded
+      if (token === generation && admitted) finishObservation($, e.tool_use_id, { kind: 'result', status: statusOf(ran), ran })
+      return ran
     } catch (error) {
-      await updateCalls($, state => settle(state, e.tool_use_id, next.signal.aborted ? 'interrupted' : 'errored')).catch(() => undefined)
-      void snap($, e.tool_use_id, 'errored')
-      void recordVerdict($, e.tool_use_id)
+      if (token === generation && admitted) finishObservation($, e.tool_use_id, { kind: 'errored', status: next.signal.aborted ? 'interrupted' : 'errored' })
       throw error
     } finally {
-      // The call is over: an Esc from here on interrupts nothing of it.
-      next.signal.removeEventListener('abort', onAbort)
-      endSpinner($, e.tool_use_id)
+      if (admitted) next.signal.removeEventListener('abort', onAbort)
     }
-    // The call ran and Claude has its result as the engine gave it: reading the response for the pane can fail on its own, and never makes the call look errored.
-    try {
-      await ensureLinks($)
-      const status = statusOf(ran)
-      const settled = await updateCalls($, state => settle(state, e.tool_use_id, status))
-      void snap($, e.tool_use_id, 'settled')
-      // Counted as unasked once it ran, and only if a trust rule (never the engine's own allow) let it through.
-      if (status === 'ran' && findCall(settled, e.tool_use_id)?.trust?.isAllowed === true) void countUnasked($)
-      // An errored call (refused at the dialog, or the tool failed) carries
-      // the engine's text, not a GraphQL response: no RESULT for it.
-      // An oversized result comes back as an error text naming the file Claude Code saved it to.
-      const stood = ran.deny === undefined ? truncationOf(ran.text) ?? truncationOf(ran.result) : undefined
-      if (status === 'ran') {
-        // Core relays the tool's text as `text` and its content blocks as `result`.
-        // The latest IR names fields by their real names; which scalars show is decided when drawn.
-        const current = await readCalls($)
-        const latest = [...current.queue, ...current.history].find(one => one.id === e.tool_use_id)
-        const ir = latest?.ir ?? call.ir
-        const result = pickResult(ran.text, ran.result)
-        // The site this response shows, before the rows' links are worked out from it.
-        await learnSites($, ir, result)
-        let outcome = outcomeOf(ir, result, linkConfig)
-        if (stood !== undefined && outcome.isUnreadable !== true) outcome = savedOutcome(outcome)
-        if (outcome.isTooLarge === true && stood?.path !== undefined) {
-          // Read the saved copy back: only a path Claude Code saved (src/result.ts), bounded.
-          try {
-            const saved = await $.fs.read(stood.path)
-            if (saved.length <= MAX_SAVED) {
-              await learnSites($, ir, saved)
-              const full = outcomeOf(ir, saved, linkConfig)
-              if (full.isUnreadable !== true) outcome = savedOutcome(full)
-            }
-          } catch {
-            // Unreadable here: the pane says the response was too large to preview.
-          }
-        }
-        const patched = await updateCalls($, state => patchOutcome(state, e.tool_use_id, outcome))
-        // Its result row is drawn as this hook returns: the block is on record by then, so the row reads only that.
-        const done = findCall(patched, e.tool_use_id)
-        if (done !== undefined && isFinal(done)) rememberResultBlock(e.tool_use_id, resultBlockOfCall(done))
-        void snap($, e.tool_use_id, 'outcome')
-        // A result Claude Code kept out of the context (saved to a file, only a preview shown) was not read.
-        if (outcome.weight !== undefined && outcome.weight.isPersisted !== true) void countRead($, outcome.weight.bytes)
-      }
-    } catch {
-      // The pane keeps what it had of the call, settled (a second settle changes nothing); the result Claude reads is untouched.
-      await updateCalls($, state => settle(state, e.tool_use_id, statusOf(ran))).catch(() => undefined)
-    }
-    void recordVerdict($, e.tool_use_id)
-    return ran
-  }).catch(($, e, next) => next(e))
-
-  // Trust rules may lift ask to allow. Preserve existing allow/deny decisions,
-  // organization ceilings, and the engine's verdict if matching fails.
-  on('tool.check', { tool: /^mcp__claude_ai_GraphOS_Agent_Services__execute$/ }, async ($, e, next) => {
-    const verdict = await next(e)
-    const id = e.tool_use_id
-    // A query from a plugin (no call behind it) is answered as the engine would.
-    if (id === undefined) return verdict
-    const server = splitMcpTool(e.tool)?.server
-    // The engine's own rules allowed it: no dialog, the call runs at once, and the spinner can say what it is.
-    if (verdict.decision === 'allow' && server !== undefined) inSpinnerOrder(() => beginSpinner($, server, id))
-    if (verdict.decision !== 'ask') return verdict
-    if ((e.ceiling !== undefined && e.ceiling !== 'allow') || (verdict.ceiling !== undefined && verdict.ceiling !== 'allow')) return verdict
-    if (server === undefined || !(await isGasServer($, server))) return verdict
-    await ensureTrust($)
-    if (trustRules.length === 0 || (await read($, isTrustOff))) return verdict
-    const fit = fitCall(e.input, trustRules)
-    await updateCalls($, state => patchTrust(state, id, keptFit(fit))).catch(() => undefined)
-    if (!fit.isAllowed) return verdict
-    const rules = [...new Set(fit.fits.map(one => one.rule))]
-    // Let through by a trust rule: no dialog either.
-    inSpinnerOrder(() => beginSpinner($, server, id))
-    return { decision: 'allow' as const, reason: `GraphOS Inspector trust rule${rules.length === 1 ? '' : 's'} ${rules.join(', ')}` }
   })
 
-  on('session.end', async ($, e, next) => {
-    if (pumpTimer !== undefined) stopPump(pumpTimer)
-    // A /clear goes on in this process with no session.start: the next call starts the pump on its own `$`.
-    wakePump = undefined
-    // Nothing pending outlives the session: a /clear goes on in this process, its pane fresh.
-    await updateCalls($, state => settleOrphans(state)).catch(() => undefined)
-    inSpinnerOrder(() => update($, spinner, () => NO_SPINNER))
-    // The next session counts from nothing.
-    const fresh = await update($, tally, () => ({ calls: 0, unasked: 0, bytes: 0 })).catch(() => undefined)
-    if (fresh !== undefined) void showStatus($, { tally: fresh })
-    return next(e)
+  // Trust rules may lift an execute's ask to allow. Preserve existing allow/deny decisions,
+  // organization ceilings, and the engine's verdict if matching fails. A lookup's
+  // verdict is the engine's, untouched. Any call still asking opens the pane (openForDialog).
+  on('tool.check', { tool: /^mcp__claude_ai_GraphOS_Agent_Services__(?:execute|search|introspect|validate|dry_run)$/ }, async ($, e, next) => {
+    const token = generation
+    const verdict = await next(e)
+    if (token !== generation) return verdict
+    // A query from a plugin (no call behind it) is answered as the engine would.
+    const id = e.tool_use_id
+    if (id === undefined) return verdict
+    const tool = splitMcpTool(e.tool)?.tool
+    const final = tool === 'execute' ? await checkExecute($, e, verdict, token).catch(() => verdict) : verdict
+    if (token !== generation) return verdict
+    if (final.decision === 'ask') {
+      void (async () => {
+        const server = splitMcpTool(e.tool)?.server
+        if (server !== undefined && (await isGasServer($, server)) && token === generation) void openForDialog($, id, token)
+      })().catch(() => undefined)
+    }
+    return final
+  })
+
+  on('session.end', ($, e, next) => {
+    const forwarded = next(e)
+    clearSessionMemory()
+    sessionDetailsNeedClearing = true
+    const token = generation
+    sessionObservation = { token, run: async () => {
+      await writes.catch(() => undefined)
+      if (token !== generation) return
+      try {
+        const previousCalls = await readStoredCalls($)
+        const previousSpinner = await read($, spinner)
+        if (token !== generation) return
+        await clearSessionDetails($, token)
+        if (token !== generation) return
+        sessionDetailsNeedClearing = false
+        const ui = await readUi($)
+        if (token !== generation) return
+        const settled = await update($, calls, current => {
+          const stored = normalizeStoredCalls(current)
+          if (token !== generation || stored.writer !== previousCalls.writer || stored.writer !== INSTANCE && stored.writer !== undefined && stored.writer !== '') return stored
+          let state = stored
+          for (const call of state.queue) state = settleStoredCalls(state, call.id, 'interrupted', ui.selection)
+          return state
+        })
+        if (token !== generation || settled.writer !== previousCalls.writer || settled.writer !== INSTANCE && settled.writer !== undefined && settled.writer !== '') return
+        await update($, spinner, current => token === generation && current.id === previousSpinner.id && current.text === previousSpinner.text ? NO_SPINNER : current)
+      } catch { /* A missing observer $ never prevents session teardown. */ }
+    } }
+    scheduleObservation($)
+    return forwarded
   })
 
   // A live line's surface module failed on a surface: from then on that
@@ -1377,9 +1965,9 @@ export const register: Register = (on, options) => {
   // the line it offers under it, is not drawn for an MCP tool's dialog
   // (2.1.290-291, tried), so the row is where the line goes. A call draws as
   // its own ToolUse row, or folded into a ToolGroup's one line.
-  // Only an `execute` row can be an Agent Services call's; an expanded group's rows are
+  // Every Agent Services call has one, a lookup's included; an expanded group's rows are
   // ToolUse rows of their own, which carry the line, so the group does not.
-  on('ui.render', { component: 'ToolUse', props: { tool: /^mcp__claude_ai_GraphOS_Agent_Services__execute$/ } }, async ($, e, next) => {
+  on('ui.render', { component: 'ToolUse', props: { tool: /^mcp__claude_ai_GraphOS_Agent_Services__(?:execute|search|introspect|validate|dry_run)$/ } }, async ($, e, next) => {
     const drawn = await next(e)
     const texts = await verdictsOf($, [e.props])
     if (texts.length === 0) return drawn
@@ -1388,7 +1976,7 @@ export const register: Register = (on, options) => {
   })
   // A folded group draws no result of its own, so each call that has a RESULT
   // block (below) has it under its verdict line here, call by call.
-  on('ui.render', { component: 'ToolGroup', props: { isExpanded: false, calls: { tool: /^mcp__claude_ai_GraphOS_Agent_Services__execute$/ } } }, async ($, e, next) => {
+  on('ui.render', { component: 'ToolGroup', props: { isExpanded: false, calls: { tool: /^mcp__claude_ai_GraphOS_Agent_Services__(?:execute|search|introspect|validate|dry_run)$/ } } }, async ($, e, next) => {
     const drawn = await next(e)
     const entries: { texts: string[]; block: ResultBlock | undefined }[] = []
     for (const call of e.props.calls) {
@@ -1436,41 +2024,35 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const elements = $.ui.resolve(e)
     const { Box, Text, Code, Button } = elements
+    if (observations.paused) return <Box flexDirection="column" backgroundColor={BACKGROUND}><Text color={QUIET}>GraphOS Inspector observation paused while its storage or analysis is unavailable. Tool calls continue.</Text>{observations.skipped > 0 && <Text color={QUIET}>{observations.skipped} calls could not be inspected.</Text>}</Box>
     // Auth links (UPSTREAM_AUTH_REQUIRED) open on click where the surface has Link.
     const Link = 'Link' in elements ? elements.Link : undefined
     // A pressed link opens through $.process (CLI only): off the terminal the surface opens it itself.
     const Markdown = 'Markdown' in elements ? (e.surface === 'terminal' ? elements.Markdown : surfaceOpened(elements.Markdown)) : undefined
     // Surface modules run on the terminal and desktop only.
     const Client = (e.surface === 'terminal' || e.surface === 'desktop') && !faulted.has(e.surface) && 'Client' in elements ? elements.Client : undefined
-    await ensureLinks($)
-    const act = (change: PaneChange) => {
-      const { toggleRaw: isRawToggle, openUrl: url, draftPrompt: draft, ...state } = change
-      if (isRawToggle === true) void toggleRaw($).catch(() => undefined)
-      if (url !== undefined) void openLink($, url)
-      if (draft !== undefined) void draftPrompt($, draft)
-      if (Object.keys(state).length === 0) return
-      void update($, paneUi, current => ({ ...current, ...state })).then(() => retitleRaw($))
-    }
+    const act = (change: PaneChange) => { void applyPaneChange($, change, shownResolvedAt(state, ui.selection).call?.id).catch(() => undefined) }
     // Stored state can predate this code (a reload keeps it): normalize both.
-    const ui = { ...CLOSED, ...(await read($, paneUi)) }
-    const state = await readCalls($)
-    const nav = navOf(state, ui.cursor)
+    const ui = await readUi($)
+    const state = await readDisplayCalls($)
+    const nav = navResolvedOf(state, ui.selection)
     try {
-      return viewOf(
+      const drawn = viewOf(
         { Box, Text, Code, Button, ...(Client !== undefined && { Client }), ...(Link !== undefined && { Link }), ...(Markdown !== undefined && { Markdown }) },
-        shownAt(state, ui.cursor),
+        shownResolvedAt(state, ui.selection),
         e.props.bodyColumns,
         ui,
         act,
         { isFocused: e.props.isFocused, surface: e.surface, bodyRows: e.props.scroll.bodyRows, scrollOffset: e.props.scroll.offset, links: linkConfig, ...(nav !== undefined && { nav }) },
       )
+      return observations.skipped === 0 ? drawn : <Box flexDirection="column" backgroundColor={BACKGROUND}><Text color={QUIET}>{observations.skipped} calls could not be inspected.</Text>{drawn}</Box>
     } catch {
       // Never a blank pane: fall back to the call's operation, escaped.
-      const call = shownAt(state, null).call
+      const call = shownResolvedAt(state, ui.selection).call
       return (
-        <Box flexDirection="column">
-          <Text dimColor>GraphOS Inspector could not draw this call.</Text>
-          {call !== null && <Code source={escapeText(call.operation).text} language="graphql" wrap="wrap" />}
+        <Box flexDirection="column" backgroundColor={BACKGROUND} minHeight={e.props.scroll.bodyRows}>
+          <Text color={QUIET}>GraphOS Inspector could not draw this call.</Text>
+          {call !== null && isFullCall(call) && <Box backgroundColor="userMessageBackground"><Code source={escapeText(call.operation).text} language="graphql" wrap="wrap" /></Box>}
         </Box>
       )
     }
@@ -1479,8 +2061,9 @@ export const register: Register = (on, options) => {
   // The raw operation of whichever call the main pane shows.
   on('ui.render', { component: 'Pane', requestId: RAW_PANE }, async ($, e) => {
     const { Box, Text, Code, Button } = $.ui.resolve(e)
-    const state = await readCalls($)
-    const call = shownAt(state, (await read($, paneUi)).cursor ?? null).call
-    return <RawView kit={{ Box, Text, Code, Button }} call={call} onClose={() => void $.ui.close({ id: RAW_PANE }).catch(() => undefined)} />
+    const state = await readDisplayCalls($)
+    const ui = await readUi($)
+    const call = shownResolvedAt(state, ui.selection).call
+    return <RawView kit={{ Box, Text, Code, Button }} call={call} bodyRows={e.props.scroll.bodyRows} ui={ui} onChange={change => void applyPaneChange($, change, call?.id).catch(() => undefined)} onClose={() => void $.ui.close({ id: RAW_PANE }).catch(() => undefined)} />
   })
 }

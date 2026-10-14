@@ -1,37 +1,43 @@
 // Shared colors, glyphs and fixed sizes for pane components.
-// Colors use engine theme keys. Fixed-width slots use narrow glyphs
+// Inspector owns its charcoal canvas. Neutral colors survive 256-color rendering;
+// warm orange and status hues are chosen for readable terminal approximations.
+// Fixed-width slots use narrow glyphs
 // (✓ ✕ ▸ ▾ ◂ ▴ ↯ ◌ ◉ ◦ ▰ ▱). Ambiguous-width glyphs (◐ ◆ ⚑ · … ─)
 // are used in flowing text, rules or the note column; the supported terminals
 // render them and the box-drawing guides as one cell.
 
 /**
- * Claude's orange, used for the history dot and the empty state's `/gas` command.
+ * Warm orange, used for sparse category accents, the history dot
+ * and the empty state's `/gas` command. Keep policy hues separate.
  */
-export const ACCENT = 'claude'
+export const ACCENT = '#FF7F00'
+export const BACKGROUND = '#262626'
+export const SELECTED = '#444444'
+/** Muted teal for service/schema context; renders as xterm 109 (#87AFAF). */
+export const DATA = '#5FAFAF'
 
 /**
- * Palette roles (docs/pane-design.md): default text for names and values;
- * BLOCK_HUE for section bars, summary borders and card outlines; `inactive`
- * for labels and syntax; `subtle` for guides and separators. Policy, writes,
- * links and result counts have separate semantic colors.
+ * Palette roles (docs/pane-design.md): white text for names and values;
+ * ACCENT for section bars; BLOCK_HUE for card outlines; QUIET for labels
+ * and syntax. Policy and outcome colors remain separate from structure.
  */
-export const BLOCK_HUE = 'autoAccept'
+export const BLOCK_HUE = '#D0D0D0'
 /** Subdued labels, keywords, types and tags. */
-export const QUIET = 'inactive'
-/** The faintest gray: tree guides, braces, rule fills. */
-export const FAINT = 'subtle'
-/** Default theme text color for names and values. */
-export const TEXT = 'text'
+export const QUIET = '#D0D0D0'
+/** Structural neutral: hierarchy comes from geometry rather than low-contrast dimming. */
+export const FAINT = '#D0D0D0'
+/** Full-contrast foreground on the owned charcoal canvas. */
+export const TEXT = '#FFFFFF'
 /** An opaque raised panel behind a hover card, so the rows under it do not show through. */
-export const PANEL = 'userMessageBackground'
+export const PANEL = BACKGROUND
 
-/** What each piece of the pane draws in. Theme keys, never the success, warning or error hues. */
+/** Structural colors; safety and outcomes use the separate semantic extension below. */
 export const STRUCT = {
   /** A block's bar (`┃ SEARCH`, `┃ RESULT`): the bar alone takes the hue, the word is bold default text. */
-  bar: BLOCK_HUE,
+  bar: ACCENT,
   verb: TEXT,
   result: TEXT,
-  /** The summary box's border: the one saturated use of the structure hue. */
+  /** Neutral outline role, retained for callers that draw framed content. */
   box: BLOCK_HUE,
   /** Rows of a root's form that label a part of it, lowercase and dim: `return type`, `access`. */
   returns: QUIET,
@@ -41,7 +47,7 @@ export const STRUCT = {
   /** Tree guides (`├ ╰ │`) and an object's `{ }`. */
   guide: FAINT,
   /** Schema types and tags after a name (`untyped JSON`, `on Issue`). */
-  type: QUIET,
+  type: DATA,
   /** Query keywords (AND, ORDER BY, in) and operators (=, ~): syntax, quieter than the values. */
   keyword: QUIET,
   operator: QUIET,
@@ -52,7 +58,7 @@ export const STRUCT = {
   /** The ↯ of a limit note. */
   limit: QUIET,
   /** RESULT's key numbers (`5 of 3,766`, `count  42`): what came back. */
-  number: 'planMode',
+  number: TEXT,
   /** A hover card's outline and title. */
   card: BLOCK_HUE,
   /** Labels inside a hover card (`type`, `args`, `needs`). */
@@ -65,36 +71,35 @@ export const struct = (key: string, _isSettled = false, extra: { bold?: boolean;
   ...extra,
 })
 
-/** Colors that mean something: safety and outcome. Structure uses STRUCT. */
+/** Accessible terminal status extension, not official Apollo brand tokens. */
 export const COLOR = {
-  allow: 'success',
-  mask: 'warning',
-  deny: 'error',
-  write: 'error',
-  fail: 'error',
-  destructive: 'error',
-  pending: 'warning',
-  /** What a press opens: a record key, a deep link. The READ badge's blue. */
-  link: 'ide',
+  allow: '#86EFAC',
+  mask: '#FDE68A',
+  deny: '#FCA5A5',
+  write: '#FCA5A5',
+  fail: '#FCA5A5',
+  destructive: '#FCA5A5',
+  pending: '#FDE68A',
+  /** Links use muted teal plus their existing brackets/arrow affordances. */
+  link: DATA,
 } as const
 
 export type SemanticColor = (typeof COLOR)[keyof typeof COLOR]
 
 /**
- * The verb badge's hue: READ a calm blue, WRITE the error red (it changes
- * data), WATCH teal. The rule under the header carries it for a write or a
+ * The verb badge's hue: READ/WATCH neutral, WRITE the failure hue (it changes
+ * data). The rule under the header carries it for a write or a
  * watch; a read's rule is faint.
  */
-export const BADGE_HUE = { query: 'ide', mutation: COLOR.write, subscription: 'planMode', unknown: COLOR.fail } as const
+export const BADGE_HUE = { query: SELECTED, mutation: COLOR.write, subscription: SELECTED, unknown: COLOR.fail } as const
 
 /**
- * The text on a painted pill (the badge, a policy chip): the theme's inverse
- * of its text color, so it reads on any hue in light and dark.
+ * Dark text on the light semantic fills. Dark selection fills instead use white.
  */
-export const PILL_TEXT = 'inverseText'
+export const PILL_TEXT = BACKGROUND
 
 /** Props for a pill: `hue` painted behind bold inverse text. */
-export const pill = (hue: string) => ({ backgroundColor: hue, color: PILL_TEXT, bold: true })
+export const pill = (hue: string) => ({ backgroundColor: hue, color: hue === SELECTED ? TEXT : PILL_TEXT, bold: true })
 
 export const GLYPH = {
   allow: '✓',
@@ -207,7 +212,7 @@ export const TONE = {
   key: {},
   op: { color: STRUCT.operator },
   value: { bold: true },
-  dim: { dimColor: true },
+  dim: { color: QUIET },
   emph: { bold: true },
   warn: { color: COLOR.fail, bold: true },
 } as const satisfies Record<string, { color?: string; bold?: boolean; dimColor?: boolean }>

@@ -10,6 +10,7 @@
 import { full, renderArg } from '../format/index.ts'
 import type { Segment } from '../format/index.ts'
 import type { CallAgent, CallIR, CallOutcome, FieldIR, TrustFit } from '../ir.ts'
+import type { CallStatus } from '../../types'
 import type { PaneUi } from './kit.ts'
 import { POLICY_WORDS, TOKEN_NOTE, UNTYPED_JSON, esc, fallbackLine, summaryOfDescription, tagsOf, hintLines, rangeHint, governedList, humanPlural, humanType, limitOf, omittedLines, policyMark, refParts, walk } from './kit.ts'
 import { listNames, notesOf } from './notes.ts'
@@ -25,7 +26,7 @@ import { FIRST_PAGE, grouped, isAllAllowed, isWriteAllowed, ownerOf, ranValid, r
 import type { ResultLine } from './outcome.ts'
 import { pagingNote } from './paging.ts'
 import { flagsOf, flagsText, productOf, requestDraft } from './flags.ts'
-import type { Nav } from '../queue.ts'
+import type { ResolvedNav as Nav } from '../queue.ts'
 import { isDestructiveName } from '../risk.ts'
 import { allowedShown, countsCells, isMeterShown, writeAllowedShown } from './meter.ts'
 import type { Flag } from './flags.ts'
@@ -37,66 +38,16 @@ import { PREVIEW_SHOWN } from '../result.ts'
 import { CHIP_WORD, DRAWER_GUTTER, DRAWER_INDENT, GLYPH, GUTTER, MARK, MAX_DOTS, METER_CELLS, NOTE_GLYPH, RIGHT_PAD, TREE, VALUE_MAX, badgeCells } from './ui/theme.ts'
 import { own } from '../guards.ts'
 import { previewOf } from '../preview/changes.ts'
+import { EXECUTE_PROFILE } from './profile.ts'
+import type { Profile } from './profile.ts'
 import type { ChangeBlock, ChangeRow, WritePreview } from '../preview/changes.ts'
 import type { Line } from '../preview/flatten.ts'
+import type { LookupBodyPlan } from './lookups.ts'
 
 // ---- Text rows
 
-/**
- * BMP characters a terminal draws as emoji, two cells wide, with no variation
- * selector (Emoji_Presentation): `⌚ ⏩ ☔ ⚡ ✅ ✨ ❌ ❓ ➕ ⬛ ⭐`. The pane's own
- * glyphs (`✓ ✕ ◐ ◆ ⚑ ↗`) are not among them.
- */
-const BMP_EMOJI: readonly [number, number][] = [
-  [0x231a, 0x231b], [0x23e9, 0x23ec], [0x23f0, 0x23f0], [0x23f3, 0x23f3], [0x25fd, 0x25fe], [0x2614, 0x2615],
-  [0x2648, 0x2653], [0x267f, 0x267f], [0x2693, 0x2693], [0x26a1, 0x26a1], [0x26aa, 0x26ab], [0x26bd, 0x26be],
-  [0x26c4, 0x26c5], [0x26ce, 0x26ce], [0x26d4, 0x26d4], [0x26ea, 0x26ea], [0x26f2, 0x26f3], [0x26f5, 0x26f5],
-  [0x26fa, 0x26fa], [0x26fd, 0x26fd], [0x2705, 0x2705], [0x270a, 0x270b], [0x2728, 0x2728], [0x274c, 0x274c],
-  [0x274e, 0x274e], [0x2753, 0x2755], [0x2757, 0x2757], [0x2795, 0x2797], [0x27b0, 0x27b0], [0x27bf, 0x27bf],
-  [0x2b1b, 0x2b1c], [0x2b50, 0x2b50], [0x2b55, 0x2b55],
-]
-const BMP_EMOJI_CODES = new Set(BMP_EMOJI.flatMap(([from, to]) => Array.from({ length: to - from + 1 }, (_, at) => from + at)))
-
-/**
- * Cells one character takes: two for East Asian wide and emoji, else one.
- * The emoji variation selector (U+FE0F) counts one: it widens the narrow
- * character before it (`✔️`, `⚠️`) to the two cells a terminal draws.
- */
-export function cellsOf(char: string): number {
-  const code = char.codePointAt(0) ?? 0
-  if (code === 0xfe0f) return 1
-  if ((code >= 0xfe00 && code <= 0xfe0e) || code === 0x200d) return 0
-  const isWide =
-    (code >= 0x1100 && code <= 0x115f) ||
-    (code >= 0x2e80 && code <= 0xa4cf) ||
-    (code >= 0xac00 && code <= 0xd7a3) ||
-    (code >= 0xf900 && code <= 0xfaff) ||
-    (code >= 0xfe30 && code <= 0xfe4f) ||
-    (code >= 0xff00 && code <= 0xff60) ||
-    (code >= 0xffe0 && code <= 0xffe6) ||
-    (code >= 0x1f300 && code <= 0x1faff) ||
-    (code >= 0x20000 && code <= 0x3fffd) ||
-    BMP_EMOJI_CODES.has(code)
-  return isWide ? 2 : 1
-}
-
-export function cellWidth(text: string): number {
-  let cells = 0
-  for (const char of text) cells += cellsOf(char)
-  return cells
-}
-
-/** The longest prefix of `text` within `width` cells. */
-function takeCells(text: string, width: number): string {
-  let used = 0
-  let out = ''
-  for (const char of text) {
-    if (used + cellsOf(char) > width) break
-    used += cellsOf(char)
-    out += char
-  }
-  return out
-}
+import { cellWidth, cellsOf, graphemes, takeCells } from './text-width.ts'
+export { cellWidth, cellsOf } from './text-width.ts'
 
 /**
  * The rows `text` wraps to at `width` cells, as the surface lays a wrapping
@@ -124,7 +75,7 @@ export function wrapLines(text: string, width: number): string[] {
         cells = cellWidth(rest)
       }
       while (used + cells > w) {
-        const head = takeCells(rest, w - used) || (line === '' ? ([...rest][0] ?? '') : '')
+        const head = takeCells(rest, w - used) || (line === '' ? (graphemes(rest)[0] ?? '') : '')
         rows.push(trimEnd(line + head))
         line = ''
         used = 0
@@ -150,7 +101,7 @@ export function cellRows(text: string, width: number): string[] {
   const rows: string[] = []
   let rest = text
   while (cellWidth(rest) > w) {
-    const head = takeCells(rest, w) || ([...rest][0] ?? '')
+    const head = takeCells(rest, w) || (graphemes(rest)[0] ?? '')
     rows.push(head)
     rest = rest.slice(head.length)
   }
@@ -169,7 +120,7 @@ export function nameRows(name: string, width: number): string[] {
   const rows: string[] = []
   let rest = name
   while (cellWidth(rest) > w) {
-    const head = takeCells(rest, w) || ([...rest][0] ?? '')
+    const head = takeCells(rest, w) || (graphemes(rest)[0] ?? '')
     let at = head.length
     for (let i = head.length - 1; i > head.length / 2; i--) {
       const before = rest[i - 1] ?? ''
@@ -299,7 +250,7 @@ export function wrapRanges(text: string, width: number): [number, number][] {
     while (cells > w) {
       let take = 0
       let taken = 0
-      for (const char of word) {
+      for (const char of graphemes(word)) {
         if (taken + cellsOf(char) > w) break
         taken += cellsOf(char)
         take += char.length
@@ -377,15 +328,9 @@ export type AnnotationOf = (field: FieldIR) => Pinned | undefined
 const isObject = (field: FieldIR) => field.children.length > 0
 const leafCount = (field: FieldIR) => walk(field.children).filter(child => !isObject(child)).length
 
-/**
- * `asks for 10 search result items`, or `list of …` with no limit; the type
- * said humanly. A service may return more than it is asked for, so this says
- * what the call asks, never what comes back: that is the flags line's
- * (`Jira returned 50 (asked 3)`).
- */
-function listNote(sdl: string, limit: number | undefined, scope?: string): string {
-  const items = esc(humanPlural(humanType(sdl, scope), limit), 120)
-  return limit === undefined ? `list of ${items}` : `asks for ${limit} ${items}`
+/** The return shape; requested limits already appear beside their arguments. */
+function listNote(sdl: string, _limit: number | undefined, scope?: string): string {
+  return `list of ${esc(humanPlural(humanType(sdl, scope)), 120)}`
 }
 
 type Entry = { kind: 'run'; fields: FieldIR[]; onType?: string } | { kind: 'object'; field: FieldIR }
@@ -421,7 +366,7 @@ function entriesOf(fields: readonly FieldIR[], annotationOf?: AnnotationOf, isTa
  * inline instead (`severity { name · rank }`) when that still takes one row:
  * a fold only where the fields really do not fit.
  */
-export function returnLines(root: FieldIR, isCollapsed = false, maxDepth = Infinity, annotationOf?: AnnotationOf, scope?: string, width?: number): ReturnLine[] {
+export function returnLines(root: FieldIR, isCollapsed = false, maxDepth = Infinity, annotationOf?: AnnotationOf, scope?: string, width?: number, showPolicy = true): ReturnLine[] {
   const limit = limitOf(root)
   const depthCap = isCollapsed ? 1 : maxDepth
   const lines: ReturnLine[] = []
@@ -455,7 +400,7 @@ export function returnLines(root: FieldIR, isCollapsed = false, maxDepth = Infin
           const tags = Object.fromEntries([field, ...field.children].map(one => [one.path, tagsOf(root, one)] as const).filter(([, found]) => found.length > 0))
           return Object.keys(tags).length > 0 ? { ...line, tags } : line
         }
-        if (width !== undefined && isFlat && returnLineRows(withTags(inline), Math.max(1, width - prefix.length)) === 1) {
+        if (width !== undefined && isFlat && returnLineRows(withTags(inline), Math.max(1, width - prefix.length), undefined, showPolicy) === 1) {
           lines.push(inline)
         } else {
           const folded = `${GLYPH.checking} ${leafCount(field)} field${leafCount(field) === 1 ? '' : 's'}`
@@ -494,8 +439,12 @@ export const lineNode = (line: ReturnLine): FieldIR | undefined => line.head ?? 
  * Whether the attention marker draws before a node: only when the node has
  * no policy mark of its own, since `✕ email` already says look here.
  */
-export const isAttentionShown = (annotation: Pinned | undefined, node: FieldIR | undefined) =>
-  annotation?.isAttention === true && (node === undefined || policyMark(node) === undefined)
+/** Preflight marks belong to pending/dry-run views; settled marks require observed denial pins. */
+export const shownPolicyMark = (field: FieldIR, annotation: Pinned | undefined, showPolicy: boolean) =>
+  showPolicy ? policyMark(field) : annotation?.note.split(' · ')[0] === 'denied' ? GLYPH.deny : undefined
+
+export const isAttentionShown = (annotation: Pinned | undefined, node: FieldIR | undefined, showPolicy = true) =>
+  annotation?.isAttention === true && (node === undefined || shownPolicyMark(node, annotation, showPolicy) === undefined)
 
 /** The marker a pinned note draws before its node: `◆` for personal data (the notes strip's glyph), `▴` for a root that writes. */
 export const attentionMarker = (pinned: Pinned) => (pinned.isPersonal ? GLYPH.personal : GLYPH.attention)
@@ -516,16 +465,16 @@ export const nameLabel = (field: FieldIR, open?: FieldIR) => `${esc(field.name, 
  * guide excluded: each Text of its wrapping row, in order. A name moves whole
  * or breaks into rows, never cut (flowLayout).
  */
-function returnLineItems(line: ReturnLine, open?: FieldIR): FlowItem[] {
+function returnLineItems(line: ReturnLine, open?: FieldIR, showPolicy = true): FlowItem[] {
   const isNamed = line.head !== undefined || line.fields.length > 0
   const named = (field: FieldIR): FlowItem[] => [
-    policyMark(field) === undefined ? '' : `${policyMark(field)} `,
+    shownPolicyMark(field, field === lineNode(line) ? line.annotation : undefined, showPolicy) === undefined ? '' : `${shownPolicyMark(field, field === lineNode(line) ? line.annotation : undefined, showPolicy)} `,
     { text: nameLabel(field, open), name: field.path, card: cardId.field(field.path) },
     classAfter(field, line),
     ...(line.tags?.[field.path] ?? []).map(tag => tag.text),
   ]
   return [
-    line.annotation !== undefined && isAttentionShown(line.annotation, lineNode(line)) ? `${attentionMarker(line.annotation)} ` : '',
+    line.annotation !== undefined && isAttentionShown(line.annotation, lineNode(line), showPolicy) ? `${attentionMarker(line.annotation)} ` : '',
     line.onType === undefined ? '' : `on ${esc(line.onType, 120)} `,
     ...(line.head === undefined ? [] : [...named(line.head), line.fields.length > 0 ? ' { ' : '']),
     ...line.fields.flatMap((field, index) => [index > 0 ? GLYPH.separator : '', ...named(field)]),
@@ -539,8 +488,8 @@ function returnLineItems(line: ReturnLine, open?: FieldIR): FlowItem[] {
 }
 
 /** Rows a return-tree line takes at `width`: its Texts flow, each moving whole to the next row when it does not fit (flowRows). */
-function returnLineRows(line: ReturnLine, width: number, open?: FieldIR): number {
-  return flowRows(returnLineItems(line, open), width)
+function returnLineRows(line: ReturnLine, width: number, open?: FieldIR, showPolicy = true): number {
+  return flowRows(returnLineItems(line, open, showPolicy), width)
 }
 
 // ---- Hover cards
@@ -566,6 +515,7 @@ export const cardId = {
   flags: () => 'g:flags',
   /** The trust line under it: ran without asking, or why it asked. */
   trust: () => 'u:trust',
+  checks: () => 'u:checks',
   /** The line under that, for a call a subagent made: which one. */
   agent: () => 'p:agent',
   /** A deep link, by its place in the list. */
@@ -596,6 +546,8 @@ export const cardId = {
   change: (path: string, index: number) => `z:${path}:${index}`,
   /** RESULT's confirmation line: what the response said back of a write's new values. */
   confirm: () => 'v:confirm',
+  /** A note in the notes strip that has more to say than its line (a diagnostic, a list), by its place among the notes. */
+  note: (index: number) => `q:note:${index}`,
 }
 
 /** A RESULT list's key: its root's response key and its field, so two roots' lists that share a field name keep their own rows and cards. */
@@ -608,8 +560,6 @@ export type Anchor = { row: number; rows: number }
 
 /** Panes narrower than this say the history position as `7/8`, not as dots. */
 const DOTS_MIN_COLUMNS = 60
-/** Cells `r: raw ↗` takes. */
-const RAW_CELLS = 8
 /** The operation name on rows of its own sits under the badge's word. */
 export const OP_INDENT = 1
 
@@ -629,7 +579,7 @@ export function serviceNames(ir: CallIR): string[] {
  * badge, `!`, the services, the operation name, and the status on the right,
  * which never goes. The services become `N services` first, then the
  * operation name takes rows of its own under row one (broken, never cut).
- * Row two: the policy on the left, the history and `r: raw ↗` on the right;
+ * Row two: the policy on the left, the history and Checks on the right;
  * where they do not fit, the counts beside the meter go first, then `✓ all N
  * allowed` says `✓ N`, then the `earlier call` words go, then the history's
  * position; on a pane too narrow even then, the controls take a row of their
@@ -642,6 +592,8 @@ export type HeaderPlan = {
   opRows?: string[]
   /** Row two is drawn: a policy to show, controls to press, or a history position. */
   hasRowTwo: boolean
+  /** Quiet inspection context, available even while no controls are pressable. */
+  hasChecks: boolean
   /** The terse counts beside the meter. */
   hasCounts: boolean
   /** `✓ all N allowed` in words; else `✓ N`. */
@@ -650,8 +602,10 @@ export type HeaderPlan = {
   hasEarlier: boolean
   /** The history position (dots, or `7/8`). */
   hasPosition: boolean
-  /** The history and `r: raw ↗` on a row of their own under the policy: the last resort. */
+  /** The history and Checks on a row of their own under the policy: the last resort. */
   isControlsBelow: boolean
+  /** Horizontal rule sharing the controls row, with one spare cell on each side. */
+  separatorCells: number
   rows: number
 }
 
@@ -664,12 +618,14 @@ function navCellsOf(nav: Nav | undefined, columns: number, hasControls: boolean,
   return items.reduce((sum, cells) => sum + cells, 0) + Math.max(0, items.length - 1)
 }
 
-export function headerPlan(ir: CallIR, o: { columns: number; status: string; nav?: Nav | undefined; isHistorical: boolean; hasControls: boolean; outcome?: CallOutcome | undefined }): HeaderPlan {
+export function headerPlan(ir: CallIR, o: { columns: number; status: string; nav?: Nav | undefined; isHistorical: boolean; hasControls: boolean; outcome?: CallOutcome | undefined; badge?: string | undefined; subject?: string | undefined; isDestructiveShown?: boolean | undefined; hasChecks?: boolean; hasPolicyFacts?: boolean }): HeaderPlan {
   const w = Math.max(1, o.columns)
   // Row one.
   const names = serviceNames(ir)
-  const op = ir.opName === undefined ? '' : esc(ir.opName, 200)
-  const fixed = badgeCells(ir.opType) + (ir.roots.some(root => isDestructiveName(root.name)) ? 2 : 0) + (o.status === '' ? 0 : 2 + cellWidth(o.status))
+  // A lookup is named by what it asked (`subject`, escaped), an execute by its operation name.
+  const op = o.subject ?? (ir.opName === undefined ? '' : esc(ir.opName, 200))
+  const badge = o.badge === undefined ? badgeCells(ir.opType) : o.badge.length + 2
+  const fixed = badge + (o.isDestructiveShown !== false && ir.roots.some(root => isDestructiveName(root.name)) ? 2 : 0) + (o.status === '' ? 0 : 2 + cellWidth(o.status))
   const fits = (services: string, name: string) => fixed + (services === '' ? 0 : 2 + cellWidth(services)) + (name === '' ? 0 : 2 + cellWidth(name)) <= w
   const full = names.join(' · ')
   const short = names.length > 1 ? `${names.length} services` : full
@@ -679,15 +635,16 @@ export function headerPlan(ir: CallIR, o: { columns: number; status: string; nav
   // Row two.
   const counts = leafPolicyCounts(ir.roots)
   // A write Agent Services allows says so (`✓ write allowed`); counts and the meter only where something it returns is masked or denied.
-  const isWrite = isWriteAllowed(ir, o.outcome)
-  const hasPolicy = counts.allow + counts.mask + counts.deny > 0 || isWrite
+  const isWrite = o.hasPolicyFacts !== false && isWriteAllowed(ir, o.outcome)
+  const hasPolicy = o.hasPolicyFacts !== false && (counts.allow + counts.mask + counts.deny > 0 || isWrite)
   const hasMeter = hasPolicy && !isWrite && isMeterShown(counts)
   // Once the call ran, what the response denied counts against saying every field was allowed (as the header draws it).
   const isAll = isAllAllowed(ir, o.outcome)
   const left = (hasCounts: boolean, isLong: boolean) => (!hasPolicy ? 0 : hasMeter ? METER_CELLS + (hasCounts ? 2 + countsCells(counts) : 0) : cellWidth(isWrite ? writeAllowedShown(isLong) : allowedShown(counts, isAll, isLong)))
   const right = (hasEarlier: boolean, hasPosition: boolean) => {
     const nav = navCellsOf(o.nav, w, o.hasControls, hasEarlier && o.isHistorical, hasPosition)
-    return nav + (o.hasControls ? (nav > 0 ? 2 : 0) + RAW_CELLS : 0)
+    const parts = [o.hasChecks ? 6 : 0, nav].filter(cells => cells > 0)
+    return parts.reduce((sum, cells) => sum + cells, 0) + Math.max(0, parts.length - 1) * 2
   }
   const steps: [boolean, boolean, boolean, boolean][] = [
     [true, true, true, true],
@@ -707,25 +664,27 @@ export function headerPlan(ir: CallIR, o: { columns: number; status: string; nav
   const isControlsBelow = fitting === undefined && hasPolicy && right(true, true) > 0
   const below = steps.find(([hasCounts, isLong, hasEarlier, hasPosition]) => left(hasCounts, isLong) + 1 <= w && right(hasEarlier, hasPosition) + 1 <= w)
   const [hasCounts, isAllowedLong, hasEarlier, hasPosition] = (isControlsBelow ? below : fitting) ?? [false, false, false, false]
-  const hasRowTwo = hasPolicy || o.hasControls || navCellsOf(o.nav, w, o.hasControls, o.isHistorical, true) > 0
+  const hasRowTwo = hasPolicy || o.hasChecks === true || navCellsOf(o.nav, w, o.hasControls, o.isHistorical, true) > 0
   return {
     services,
     ...(opRows !== undefined && { opRows }),
     hasRowTwo,
+    hasChecks: o.hasChecks === true,
     hasCounts: hasMeter && hasCounts,
     isAllowedLong,
     hasEarlier: hasEarlier && o.isHistorical,
     hasPosition,
     isControlsBelow,
+    separatorCells: Math.max(0, w - (isControlsBelow ? 0 : left(hasCounts, isAllowedLong)) - right(hasEarlier, hasPosition) - 2),
     rows: 1 + (opRows?.length ?? 0) + (hasRowTwo ? 1 : 0) + (isControlsBelow ? 1 : 0),
   }
 }
 
 // ---- The plan
 
-/** Dim, left-aligned credit row directly above the summary box. */
+/** Model attribution inset into the summary frame; also used for frameless credit. */
 export function creditOf(): string {
-  return 'summary · Haiku'
+  return 'Haiku'
 }
 
 /**
@@ -736,8 +695,8 @@ export function creditOf(): string {
  * spaces), never under GUTTER or the `return type` row, never over
  * VALUE_MAX; a longer name stacks its value on the next row.
  */
-export function valueColumn(ir: CallIR): number {
-  const names = ir.roots.flatMap(root => [...root.args.map(arg => arg.name), ...(root.omittedArgs ?? []).filter(arg => arg.default !== undefined).slice(0, MAX_DEFAULTS).map(arg => arg.name)])
+export function valueColumn(ir: CallIR, isDeclared = false): number {
+  const names = ir.roots.flatMap(root => [...root.args.map(arg => arg.name), ...shownOmitted(root, isDeclared).map(arg => arg.name)])
   const fitting = names.map(name => MARK + cellWidth(esc(name, 100)) + 2).filter(cells => cells <= VALUE_MAX)
   return Math.min(VALUE_MAX, Math.max(GUTTER, MARK + SUB_LABEL + 2, ...fitting))
 }
@@ -811,6 +770,8 @@ export type PlanOptions = {
   hasControls?: boolean
   /** The status word the header's first row ends in (`✓ ran`, `1 of 3`); empty for none. */
   status?: string
+  /** Actual lifecycle, separate from the rendered status phrase. */
+  callStatus?: CallStatus
   /** Where the pane stands in its history (src/queue.ts navOf), for the header's second row. */
   nav?: Nav
   /** How the call fared against the person's trust rules (src/trust.ts), when they have any. */
@@ -819,6 +780,16 @@ export type PlanOptions = {
   agent?: CallAgent
   /** The call as the model sent it, and why its input could not be read: an unparseable call draws these in place of the form. */
   sent?: { operation: string; variables: string; inputError?: string }
+  /** Which blocks this kind of call draws (src/view/kinds.ts); an execute's when absent. */
+  profile?: Profile
+  /** The headline box's line, computed, in place of Haiku's: a lookup's (escaped). */
+  headline?: string
+  /** The badge's word, in place of the one the operation type gives. */
+  badge?: string
+  /** What the header names the call by, in place of its operation name (escaped). */
+  subject?: string
+  /** Notes only this kind of call has, first in the strip. */
+  notes?: readonly Note[]
 }
 
 /** Detail reduction order. The first eight steps preserve the standard layout. */
@@ -964,6 +935,8 @@ export type RootPlan = {
 }
 
 export type Plan = {
+  lookup?: LookupBodyPlan
+  details?: { title: string; baseId: string; page: number; pages: number; lines: string[]; rows: number }
   /** The rows asked for, and the estimate of what the plan draws. */
   rows: number
   total: number
@@ -977,11 +950,15 @@ export type Plan = {
   /** The pane's value column (valueColumn). */
   column: number
   summary: {
-    /** Lines the headline takes inside its box: all of them, never cut. */
+    /** The prose: Haiku's headline, a lookup's computed one, or the fallback. Escaped where it is not Haiku's. */
+    text: string
+    /** Lines the indented headline takes: all of them, never cut. */
     lines: number
-    /** Whether the model credit row is shown above the summary box. */
+    /** Whether model credit appears in the bottom border (or above frameless prose). */
     hasCredit: boolean
-    /** Credit, headline and two border rows; 0 when the summary is empty. */
+    /** A frame fits only when its category label and content gutter fit. */
+    isFramed: boolean
+    /** Frame or credit and headline rows; 0 when the summary is empty. */
     rows: number
   }
   /** The flags line under the box (src/view/flags.ts): never cut, it wraps. */
@@ -1042,6 +1019,11 @@ type Knobs = {
 
 /** Arguments left out that have a default, shown dim under the set ones. */
 const MAX_DEFAULTS = 3
+/** Declared arguments a found operation lists: every one, to a safety bound. */
+const MAX_DECLARED = 40
+
+/** The arguments a root lists that the call did not set: a few with a default, or (a schema view) every one it declares. */
+const shownOmitted = (root: FieldIR, isDeclared: boolean) => (isDeclared ? (root.omittedArgs ?? []).slice(0, MAX_DECLARED) : (root.omittedArgs ?? []).filter(arg => arg.default !== undefined).slice(0, MAX_DEFAULTS))
 
 /** Whether `extra` joins the last line of `base` without taking a row. */
 const fitsBeside = (base: string, extra: string, width: number) => extra !== '' && textRows(`${base}${extra}`, width) <= textRows(base, width)
@@ -1052,8 +1034,8 @@ const SOFT_GLYPHS: readonly string[] = [GLYPH.personal, GLYPH.limit]
 const NOTE_ROWS = 2
 const SHOWN_NAMES = 6
 const ARG_LINES = 3
-/** The headline box's border and paddingX, across. */
-export const SUMMARY_FRAME = 4
+/** The headline's left inset; prose uses the remaining width. */
+export const SUMMARY_INDENT = 2
 
 export const isNeverShed = (note: Note) => NEVER_SHED_GLYPHS.includes(note.glyph)
 export const isSoft = (note: Note) => SOFT_GLYPHS.includes(note.glyph)
@@ -1459,39 +1441,44 @@ export function changesPlanOf(preview: WritePreview | undefined, inner: number, 
   return { blocks, column, rows: blocks.reduce((sum, block) => sum + gap + block.total, 0) }
 }
 
+/** A note whose card says more than its line: a diagnostic's whole text, or a list of names. */
+export const hasNoteCard = (note: Note) => note.card !== undefined || (note.names?.length ?? 0) > 0
+
 /** Shares `opts.rows` between the pane's blocks; see the file comment. */
 export function planOf(ir: CallIR, opts: PlanOptions): Plan {
   const inner = Math.max(1, Math.floor(opts.columns) - RIGHT_PAD)
   const hasForm = ir.state !== 'unparseable' && ir.opType !== undefined
-  const column = hasForm ? valueColumn(ir) : GUTTER
+  const profile = opts.profile ?? EXECUTE_PROFILE
+  const column = hasForm ? valueColumn(ir, profile.isDeclared) : GUTTER
   const value = Math.max(1, inner - column)
   const gap = opts.sectionGap ?? 0
   const isSettled = !opts.isPending
+  const showPolicy = opts.isPending || (profile.isLookup && profile.policyFacts)
   const open = opts.open
   const now = opts.now ?? 0
 
   const summaryParts = ir.summary === undefined ? undefined : refParts(ir.summary.headline)
   // While Haiku is still reading, the scale (or a stand-in) shimmers on one line.
   const isShimmering = ir.summary === undefined && ir.isSummarizing === true && opts.isPending
-  const summaryText = (summaryParts?.map(part => part.text).join('') ?? fallbackLine(ir)).replace(/\s+/g, ' ').trim()
-  const result = hasForm && isSettled ? resultLines(opts.outcome, ir, opts.linkConfig) : []
-  const flags = hasForm ? flagsOf(ir, isSettled ? opts.outcome : undefined, isSettled) : []
+  const summaryText = (opts.headline ?? summaryParts?.map(part => part.text).join('') ?? (profile.isLookup ? fallbackLine(ir) : '')).replace(/\s+/g, ' ').trim()
+  const result = hasForm && isSettled && !profile.isLookup ? resultLines(opts.outcome, ir, opts.linkConfig) : []
+  const flags = hasForm && profile.flags ? flagsOf(ir, isSettled ? opts.outcome : undefined, isSettled) : []
   // Settled with presses, a requestable denial gets its own button row under the line (`a: draft access request`).
   const draft = isSettled && opts.hasControls === true ? requestDraft(flags, ir.opName) : undefined
   const flagRows = flags.length === 0 ? 0 : textRows(flagsText(flags, draft !== undefined), inner - NOTE_GLYPH) + (draft === undefined ? 0 : 1)
   // Under the flags: the trust rules' word on the call, wrapped, never cut.
-  const trust = hasForm ? trustLineOf(opts.trust) : undefined
+  const trust = hasForm ? trustLineOf(opts.trust, opts.callStatus) : undefined
   const trustRows = trust === undefined ? 0 : textRows(trust.text, inner - NOTE_GLYPH)
   // Under that, for a call a subagent made, which one: wrapped too.
   const agent = hasForm ? agentLineOf(opts.agent) : undefined
   const agentRows = agent === undefined ? 0 : textRows(agent.text, inner - NOTE_GLYPH)
-  const policyRow = hasForm && ((({ allow, mask, deny }) => allow + mask + deny > 0)(leafPolicyCounts(ir.roots)) || isWriteAllowed(ir, isSettled ? opts.outcome : undefined))
+  const policyRow = hasForm && (opts.isPending || (profile.isLookup && profile.policyFacts)) && ((({ allow, mask, deny }) => allow + mask + deny > 0)(leafPolicyCounts(ir.roots)) || isWriteAllowed(ir, isSettled ? opts.outcome : undefined))
   // A write's CHANGES: computed from the call alone, its rows counted at the CHANGES column.
-  const preview = hasForm ? previewOf(ir) : undefined
+  const preview = hasForm && !profile.isLookup ? previewOf(ir) : undefined
   const changeCol = changeColumn(preview, inner, column)
-  const head = headerPlan(ir, { columns: inner, status: opts.status ?? '', nav: opts.nav, isHistorical: isSettled && opts.nav !== undefined && !opts.nav.isLive, hasControls: opts.hasControls === true, outcome: opts.outcome })
+  const head = headerPlan(ir, { columns: inner, status: opts.status ?? '', nav: opts.nav, isHistorical: isSettled && opts.nav !== undefined && !opts.nav.isLive, hasControls: opts.hasControls === true, outcome: opts.outcome, badge: opts.badge, subject: opts.subject, isDestructiveShown: profile.flags, hasChecks: hasForm && !profile.isDeclared, hasPolicyFacts: opts.isPending || (profile.isLookup && profile.policyFacts) })
   const header = head.rows
-  const links = hasForm ? (opts.links ?? []) : []
+  const links = hasForm && !profile.isLookup ? (opts.links ?? []) : []
   // A root says `not checked` only when other roots were checked: when none was, the notes strip says it once.
   const isAllUnknown = walk(ir.roots).every(field => field.policy === 'unknown')
 
@@ -1514,16 +1501,15 @@ export function planOf(ir: CallIR, opts: PlanOptions): Plan {
     const openField = isSettled ? fields.find(field => field.path === open.field) : undefined
     // Value ranges stay inline; constraints (`requires a bounded query`, timezones, `one of`) are for the hover card.
     const hintText = (all: readonly string[] | undefined) => {
-      const hints = (all ?? []).filter(rangeHint)
-      return hints.length === 0 ? '' : `  ${GLYPH.separator.trim()} ${hints.slice(0, 2).map(hint => esc(hint, 80)).join(GLYPH.separator)}`
+      const hints = opts.isPending ? (all ?? []) : (all ?? []).filter(rangeHint)
+      return hints.length === 0 ? '' : `  ${GLYPH.separator.trim()} ${(opts.isPending ? hints : hints.slice(0, 2)).map(hint => esc(hint, 80)).join(GLYPH.separator)}`
     }
     const rootHint = hintText(root.schema?.hints)
     const argHints = root.args.map(arg => hintText(arg.hints))
     const description = summaryOfDescription(root.schema?.description)
-    const defaults = (root.omittedArgs ?? [])
-      .filter(arg => arg.default !== undefined)
-      .slice(0, MAX_DEFAULTS)
-      .map(arg => ({ name: esc(arg.name, 100), text: `${esc(arg.default ?? '', 60)}  (default)` }))
+    // A schema view lists each declared argument by its type (`String! = "and"`); a call, the defaults it left the server to use.
+    const defaults = shownOmitted(root, profile.isDeclared)
+      .map(arg => ({ name: esc(arg.name, 100), text: profile.isDeclared ? esc(`${arg.type}${arg.default === undefined ? '' : ` = ${arg.default}`}`, 160) : `${esc(arg.default ?? '', 60)}  (default)` }))
       // A name too long for the value column has its own rows, broken there rather than cut.
       .map(one => ({ ...one, ...(isStacked(one.name, column) && { rows: nameRows(one.name, inner - MARK) }) }))
     const paged = root.paging === undefined ? undefined : pagingNote(root.paging)
@@ -1575,11 +1561,14 @@ export function planOf(ir: CallIR, opts: PlanOptions): Plan {
     return made
   }
   const pinsCache = new Map<string, AnnotationIndex>()
-  const pinsOf = (level: AnnotationLevel) => memo(pinsCache, level, () => annotationIndex(ir, level, opts.outcome))
+  const annotationOutcome = isSettled && !profile.isLookup ? opts.outcome ?? { rows: [], errors: [], authLinks: [] } : opts.outcome
+  const pinsOf = (level: AnnotationLevel) => memo(pinsCache, level, () => annotationIndex(ir, level, annotationOutcome))
 
   // The headline box has a border and one padding cell on each side, with a credit row above it.
   // A shimmering line wraps after its glyph column, as the still line and the spinner draw it.
-  const summaryLines = summaryText === '' ? 0 : isShimmering ? textRows(summaryText, Math.max(1, inner - SUMMARY_FRAME - NOTE_GLYPH)) : wrapRanges(summaryText, Math.max(1, inner - SUMMARY_FRAME)).length
+  const summaryFramed = inner >= 12
+  const summaryInset = summaryFramed ? 4 : SUMMARY_INDENT
+  const summaryLines = summaryText === '' ? 0 : isShimmering ? textRows(summaryText, Math.max(1, inner - summaryInset - NOTE_GLYPH)) : wrapRanges(summaryText, Math.max(1, inner - summaryInset)).length
 
   const changesCache = new Map<string, ChangesPlan>()
   const changesAt = (bodyRows: number, space: number) => memo(changesCache, `${bodyRows}|${space}`, () => changesPlanOf(preview, inner, changeCol, bodyRows, space))
@@ -1650,12 +1639,12 @@ export function planOf(ir: CallIR, opts: PlanOptions): Plan {
     // The root's drawer takes the root's width; a tree name's, the value column's.
     const drawerAt = (list: readonly (FieldIR | undefined)[], width = value) =>
       facts.openField !== undefined && list.includes(facts.openField) ? fieldDrawerRows(facts.openField, width, gap) : 0
-    const rootNote = pins.field(root.coordinate)
+    const rootNote = pins.field(root.path)
     // The root's header row as the form lays it out (src/view/form.tsx RootForm): its Texts flow, the name cut to the row after its alias.
     const alias = root.alias === undefined ? '' : esc(root.alias, 40).replace(/\s+/g, ' ')
     const rootItems = (hint: string): FlowItem[] => [
-      rootNote !== undefined && isAttentionShown(rootNote, root) ? `${attentionMarker(rootNote)} ` : '',
-      policyMark(root) === undefined ? '' : `${policyMark(root)} `,
+      rootNote !== undefined && isAttentionShown(rootNote, root, showPolicy) ? `${attentionMarker(rootNote)} ` : '',
+      shownPolicyMark(root, rootNote, showPolicy) === undefined ? '' : `${shownPolicyMark(root, rootNote, showPolicy)} `,
       alias === '' ? '' : `${alias}: `,
       // An open drawer's name says so (`… ▾`).
       { text: nameLabel(root, facts.openField), name: root.path },
@@ -1710,11 +1699,11 @@ export function planOf(ir: CallIR, opts: PlanOptions): Plan {
     const defaultRows = defaults.reduce((sum, one) => sum + textRows(one.text, value) + (one.rows?.length ?? 0), 0)
 
     const isCollapsed = k.collapsed[r] === true
-    const all = returnLines(root, isCollapsed, Infinity, field => pins.field(field.coordinate), root.service ?? ir.service, value)
+    const all = profile.hasFieldTree === false ? [] : returnLines(root, isCollapsed, Infinity, field => pins.field(field.path), root.service ?? ir.service, value, showPolicy)
     const keep = Math.min(all.length, k.returnsMax[r] ?? Infinity)
     const drawnLines = all.slice(0, keep).map(line => {
-      const breaks = nameBreaks(returnLineItems(line, facts.openField), value - line.prefix.length)
-      return { ...line, rows: returnLineRows(line, value - line.prefix.length, facts.openField), ...(breaks !== undefined && { breaks }) }
+      const breaks = nameBreaks(returnLineItems(line, facts.openField, showPolicy), value - line.prefix.length)
+      return { ...line, rows: returnLineRows(line, value - line.prefix.length, facts.openField, showPolicy), ...(breaks !== undefined && { breaks }) }
     })
     const returnsMore = all.length - keep
     const paging = k.paging && facts.paged !== undefined && !facts.isPagedInResult && all.length > 0 ? facts.paged : undefined
@@ -1744,7 +1733,7 @@ export function planOf(ir: CallIR, opts: PlanOptions): Plan {
     const scopesAll = isAccessMerged ? mergedScopes : facts.scopes
     const isUnchecked = isAccessMerged ? rootFacts.every(one => one.isUnchecked) : facts.isUnchecked
     const needs = Math.min(scopesAll.length, k.needs[r] ?? Infinity)
-    const empty = scopesAll.length === 0 && isUnchecked ? 'not checked' : undefined
+    const empty = showPolicy && scopesAll.length === 0 && isUnchecked ? 'not checked' : undefined
     const access: AccessPlan = {
       scopes: scopesAll,
       rawScopes: isAccessMerged ? mergedRaw : facts.rawScopes,
@@ -1782,7 +1771,7 @@ export function planOf(ir: CallIR, opts: PlanOptions): Plan {
     }
     y += drawnLines.length > 0 ? leadRows : 0
     for (const line of drawnLines) {
-      const items = returnLineItems(line, facts.openField)
+      const items = returnLineItems(line, facts.openField, showPolicy)
       flowPlaces(items, value - line.prefix.length).forEach((place, i) => {
         const item = items[i]
         if (typeof item === 'object' && item.card !== undefined) triggers.push([item.card, { row: y + place.row, rows: place.rows }])
@@ -1805,7 +1794,7 @@ export function planOf(ir: CallIR, opts: PlanOptions): Plan {
       access,
       rows,
     }
-    const homed = [root, ...drawnLines.flatMap(line => [...(line.head === undefined ? [] : [line.head]), ...line.fields])].filter(field => policyMark(field) !== undefined || pins.field(field.coordinate) !== undefined)
+    const homed = [root, ...drawnLines.flatMap(line => [...(line.head === undefined ? [] : [line.head]), ...line.fields])].filter(field => (showPolicy && policyMark(field) !== undefined) || pins.field(field.path) !== undefined)
     return { plan, triggers, homed, homeKey: homed.map(field => fieldIndex.get(field)).join(',') }
   }
   // Each attempt changes a root-specific or shared setting. Reuse each
@@ -1835,7 +1824,7 @@ export function planOf(ir: CallIR, opts: PlanOptions): Plan {
     const keys = parts.map(part => part.homeKey)
     const all = memo(notesCache, keys.join(';'), () => {
       const homed = new Set(parts.flatMap(part => part.homed))
-      return hasForm ? notesOf(ir, field => homed.has(field), isSettled, ranValid(opts.outcome)) : []
+      return hasForm ? [...(opts.notes ?? []), ...notesOf(ir, field => homed.has(field), isSettled, ranValid(opts.outcome), profile)] : []
     })
     notesSeen = { keys, all }
     return all
@@ -1876,8 +1865,8 @@ export function planOf(ir: CallIR, opts: PlanOptions): Plan {
   // Build from the current settings. Compute hover anchors for the final plan.
   const build = (k: Knobs, hasAnchors = true): Plan => {
     const space = k.gaps ? 1 + gap : 0
-    const hasCredit = k.credit && ir.summary !== undefined && summaryLines > 0
-    const summary = { lines: summaryLines, hasCredit, rows: summaryLines === 0 ? 0 : summaryLines + 2 + (hasCredit ? 1 : 0) }
+    const hasCredit = ir.summary !== undefined && opts.headline === undefined && summaryLines > 0
+    const summary = { text: summaryText, lines: summaryLines, hasCredit, isFramed: summaryFramed, rows: summaryLines === 0 ? 0 : summaryLines + (summaryFramed ? 2 : hasCredit ? 1 : 0) }
     const changes = changesAt(k.bodyRows, space)
     const { shown: shownResult, rows: resultRows, rowsOf: resultRowsOf } = resultAt(k)
     const parts = rootFacts.map((_, r) => rootAt(r, k))
@@ -1901,7 +1890,7 @@ export function planOf(ir: CallIR, opts: PlanOptions): Plan {
         textRows(`Could not read this operation (${esc(ir.failure ?? opts.sent?.inputError ?? 'unknown reason', 300)}). Showing it as sent:`, inner) +
         codeRows(esc(opts.sent?.operation ?? ''), inner) +
         (opts.sent === undefined || opts.sent.variables === '' ? 0 : codeRows(esc(opts.sent.variables), inner))
-    const total = header + 1 + body
+    const total = header + body
 
     // Each hover trigger's rows on the pane, top down as the view stacks the blocks.
     const anchors = new Map<string, Anchor>()
@@ -1914,13 +1903,14 @@ export function planOf(ir: CallIR, opts: PlanOptions): Plan {
       if (hasForm) {
         anchor(cardId.badge(), 0, 1)
         if (head.services !== '') anchor(cardId.services(), 0, 1)
-        if (ir.opName !== undefined) anchor(cardId.op(), head.opRows === undefined ? 0 : 1, head.opRows?.length ?? 1)
+        if (opts.subject !== undefined || ir.opName !== undefined) anchor(cardId.op(), head.opRows === undefined ? 0 : 1, head.opRows?.length ?? 1)
         if ((opts.status ?? '') !== '') anchor(cardId.status(), 0, 1)
       }
       if (policyRow) anchor(cardId.meter(), 1 + (head.opRows?.length ?? 0), 1)
-      // Summary credit on the first row below the header separator.
-      if (summary.hasCredit) anchor(cardId.credit(), header + 1, 1)
-      let top = header + 1 + summary.rows
+      if (head.hasChecks) anchor(cardId.checks(), 1 + (head.opRows?.length ?? 0) + (head.isControlsBelow ? 1 : 0), 1)
+      // Credit is inset into the bottom edge, or above frameless prose.
+      if (summary.hasCredit) anchor(cardId.credit(), header + (summary.isFramed ? summary.rows - 1 : 0), 1)
+      let top = header + summary.rows
       // The flags line with its button row, so a card below it leaves the button bare.
       if (flags.length > 0) anchor(cardId.flags(), top, flagRows)
       top += flagRows
@@ -1968,6 +1958,15 @@ export function planOf(ir: CallIR, opts: PlanOptions): Plan {
         })
         top += resultRows
       }
+      // A note with more to say than its line lights its card from its rows.
+      if (shown.length > 0) {
+        let at = top + space
+        for (const one of shown) {
+          const note = notes[one.index]
+          if (note !== undefined && hasNoteCard(note)) anchor(cardId.note(one.index), at, one.rows)
+          at += one.rows
+        }
+      }
       top += noteRows
       roots.forEach((root, r) => {
         // The form's gap above the first root, and the gap between roots.
@@ -1990,7 +1989,7 @@ export function planOf(ir: CallIR, opts: PlanOptions): Plan {
       fits: total <= opts.rows,
       header,
       head,
-      rule: 1,
+      rule: 0,
       gap: space,
       column,
       summary,
@@ -2041,7 +2040,7 @@ export function planOf(ir: CallIR, opts: PlanOptions): Plan {
     'default-args': () => knobs.defaults && tryStep(() => (knobs.defaults = false), () => (knobs.defaults = true)),
     'paging-line': () => knobs.paging && tryStep(() => (knobs.paging = false), () => (knobs.paging = true)),
     'summary-credit': () => knobs.credit && tryStep(() => (knobs.credit = false), () => (knobs.credit = true)),
-    links: () => knobs.links && tryStep(() => (knobs.links = false), () => (knobs.links = true)),
+    links: () => opts.hasControls !== true && knobs.links && tryStep(() => (knobs.links = false), () => (knobs.links = true)),
     'returns-collapse': () =>
       lastFirst(rootFacts.length).some(
         r => !knobs.collapsed[r] && tryStep(() => (knobs.collapsed[r] = true), () => (knobs.collapsed[r] = false)),

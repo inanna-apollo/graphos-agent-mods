@@ -188,6 +188,7 @@ test('a link the system cannot open, and a draft the prompt box refuses, are eac
 })
 
 test('/gas runs at once when typed mid-turn', async ($, on) => {
+  const clock = mock.clock(on)
   const registered: { name: string; immediate?: boolean }[] = []
   on('session.start', () => ({ cwd: '/tmp' }))
   on('command.register', (_, e) => {
@@ -195,5 +196,6 @@ test('/gas runs at once when typed mid-turn', async ($, on) => {
     return { value: { command: e.name } }
   })
   await start($)
+  for (let step = 0; step < 100 && registered.length === 0; step++) await clock.advance(10)
   expect(registered).toContainEqual({ name: 'gas', immediate: true })
 })

@@ -1,6 +1,6 @@
 ---
 name: graphos-inspector
-description: Use when preparing GraphOS Agent Services execute operations in Claude Code. GraphOS Inspector may show the operation, arguments, policy checks, and results while the user reviews the call.
+description: Use when preparing GraphOS Agent Services execute operations in Claude Code. GraphOS Inspector may show the operation, arguments, policy checks, and results while the user reviews the call, and shows search, introspect, validate, and dry_run calls with what they found.
 ---
 
 # Prepare calls the user can review

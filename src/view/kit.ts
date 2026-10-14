@@ -2,6 +2,7 @@
 // state, and small pure helpers. Pure apart from the element table.
 
 import type { Elements, RenderSurface } from 'claude-code'
+import type { LookupTool, SelectedCall } from '../../types'
 
 import { escapeText } from '../escape.ts'
 import { LIMIT_ARGS, PLACE_ARGS, isAuxiliaryList, limitOf } from '../guards.ts'
@@ -12,6 +13,7 @@ import { fallbackHeadline } from '../summary.ts'
 import type { AnnotationIndex } from './annotations.ts'
 import { isPersonObject } from './personal.ts'
 import type { Anchor } from './plan.ts'
+import type { Profile } from './profile.ts'
 import { COLOR, GLYPH } from './ui/theme.ts'
 
 /**
@@ -39,14 +41,19 @@ export type PaneUi = {
   /** The argument shown in full, as `<field path>(<arg name>)`. */
   arg: string | null
   /** null follows live (the pending head, else the newest settled call); N shows `history[N]`. Kept across drawers, reset when a call arrives. */
-  cursor: number | null
+  cursor?: number | null
+  selection: SelectedCall
   /** The RESULT row opened out to all its fields, as `<call id>:<list>:<index>` (src/view/plan.ts rowKey): it never matches another call's row. */
   row: string | null
   /** The RESULT list opened out past its first rows, as `<call id>:<list>` (src/view/plan.ts moreKey). */
   more?: string | null
+  /** Complete details stay attached to the call that opened them. */
+  detail?: { callId: string; detailId: string } | null
+  rawPage?: number
+  rawAsSent?: boolean
 }
 
-export const CLOSED: PaneUi = { field: null, arg: null, cursor: null, row: null, more: null }
+export const CLOSED: PaneUi = { field: null, arg: null, cursor: null, selection: { kind: 'live' }, row: null, more: null }
 
 /**
  * A change to the pane's state. `toggleRaw` asks the host to open or close the
@@ -56,7 +63,7 @@ export const CLOSED: PaneUi = { field: null, arg: null, cursor: null, row: null,
  * `draftPrompt` asks it to put text in the prompt box (an access request to send), never to send it.
  * The host does the `$` call.
  */
-export type PaneChange = Partial<PaneUi> & { toggleRaw?: true; openUrl?: string; draftPrompt?: string }
+export type PaneChange = Partial<PaneUi> & { toggleRaw?: true; openUrl?: string; draftPrompt?: string; expectedCallId?: string }
 
 export type Act = (change: PaneChange) => void
 
@@ -86,6 +93,9 @@ export type Ctx = {
   links?: LinkConfig
   /** The pane's value column (plan.ts valueColumn): every label gutter, so every value starts at one column. */
   column: number
+  /** Which blocks this kind of call draws and how its form reads (src/view/kinds.ts); an execute's when absent. */
+  profile?: Profile
+  tool?: LookupTool
   /**
    * Where the hover cards pop up (src/view/ui/hover.tsx placeOf): each
    * trigger's rows (Plan.anchors) and the rows in view, `top` the first. A
@@ -409,4 +419,4 @@ export function tagsOf(root: FieldIR, field: FieldIR): FieldTag[] {
  * of it (the schema coordinate, the service, the classification, the policy's
  * reason), each escaped where it was kept.
  */
-export type RequestItem = { what: string; coord?: string; service?: string; classification?: string; reason?: string }
+export type RequestItem = { what: string; path?: string; coord?: string; service?: string; classification?: string; reason?: string }

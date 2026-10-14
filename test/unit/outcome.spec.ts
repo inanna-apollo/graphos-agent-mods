@@ -18,10 +18,10 @@ test('resultLines: rows, then a preview of them (escaped), then scalars', () => 
   assert.equal(lines[2]?.kind === 'scalar' && lines[2].text, '1,342')
 })
 
-test('resultLines: a first page says so when the root pages', () => {
+test('resultLines: a first-page request does not claim response completeness', () => {
   const ir = { roots: [{ name: 'confluence_search', children: [{ name: 'results' }], paging: { kind: 'cursor', via: ['cursor'], isFirstPage: true } }] }
   const rows = resultLines(outcome as never, ir as never)[0]
-  assert.ok(rows?.kind === 'rows' && rows.note === 'first page')
+  assert.ok(rows?.kind === 'rows' && rows.note === 'first page requested · continuation unknown')
 })
 
 test('resultLines: the count, then the items; an empty list reads "no …", never "of 0"; a total above 0 reads "none of N …"', () => {

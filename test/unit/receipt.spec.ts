@@ -1,5 +1,5 @@
 // The context receipt as the pane, the flags line, the transcript and the
-// standing line say it (src/view/receipt.ts): what each words says, when a
+// result say it (src/view/receipt.ts): what each word says, when a
 // field is named and when a flag is raised, and that nothing a response wrote
 // reaches the pane unescaped. Pure text, on fixtures of the test's own.
 import assert from 'node:assert/strict'
@@ -14,7 +14,6 @@ import { resultLines } from '../../src/view/outcome.ts'
 import { SHED_ORDER, cardId, planOf, shedOrder } from '../../src/view/plan.ts'
 import { CLOSED } from '../../src/view/kit.ts'
 import { cardOf, metaWords, receiptOf } from '../../src/view/receipt.ts'
-import { statusLine } from '../../src/view/status.ts'
 import { resultBlockOf } from '../../src/view/transcript.ts'
 import { LINKS } from './link-fixture.ts'
 
@@ -50,16 +49,16 @@ test('a field the flags line already calls out is not named again on the line: e
   assert.ok(flagsOf(ir, outcome, true).some(flag => /^issues\.fields\.text is \d+% of a/.test(plain(flag.text))))
 })
 
-test('the response\'s own members beside the data keep their real name on the line, with plain words as a gloss for the cards', () => {
+test('response metadata uses plain labels on the receipt, with its exact path retained in the facts', () => {
   const ir = irOf('query Q { r }')
   // Denial tokens are most of a small response: named on the line, not flagged.
   const response = { data: { r: 'x'.repeat(400) }, errors: Array.from({ length: 3 }, () => ({ message: 'm', extensions: { denial_context: 'tok'.repeat(300) } })) }
   const receipt = receiptOf(outcomeOf(ir, mcp(response)), ir)
   assert.ok(receipt !== undefined && receipt.dominant === undefined)
-  assert.match(plain(receipt.line), /· denial_context \d+%$/)
+  assert.match(plain(receipt.line), /· denial tokens \d+%$/)
   assert.equal(receipt.lead?.label, 'errors.extensions.denial_context')
   assert.equal(receipt.lead?.gloss, 'denial tokens')
-  assert.ok(cardOf(receipt).fields.some(field => field.label === 'errors.extensions.denial_context'))
+  assert.ok(cardOf(receipt).fields.some(field => field.label === 'denial tokens'))
 })
 
 test('plain words for the response\'s members: denial tokens, error messages and details, anything else by its part', () => {
@@ -152,30 +151,32 @@ test('a result Claude Code kept out of the context says Claude saw only a short 
   assert.deepEqual(resultLines(stood, SEARCH).map(one => one.kind), ['weight'])
 })
 
-test('the card says each named field\'s size, share and cost a row, what the result would be without it, and the card is what a person reads', () => {
+test('the receipt hover gives compact size facts without claims about model attention', () => {
   const receipt = receiptOfResponse(issues(40, 1000))
   assert.ok(receipt !== undefined)
   const card = cardOf(receipt)
-  assert.match(plain(card.title), /^context · \d+ KB · about [\d.]+k tokens$/)
-  assert.match(plain(card.paragraphs[0] ?? ''), /^Claude read this whole response: \d+ KB, or about [\d.]+k tokens\./)
-  // How it is measured, said as an estimate.
-  assert.match(card.paragraphs[1] ?? '', /compactly, in UTF-8 bytes/)
+  assert.match(plain(card.title), /^Response size · \d+ KB · about [\d.]+k tokens$/)
+  assert.match(card.paragraphs.join(' '), /Compact JSON bytes.*estimated as bytes ÷ 4/)
   const [field] = card.fields
   assert.equal(field?.label, 'issues.fields.text')
-  assert.match(plain(field?.takes ?? ''), /^\d+ KB · \d+% of the response · 40 rows, about \d+ B each$/)
-  assert.match(plain(field?.without ?? ''), /^Without issues\.fields\.text this result would be about \d+(\.\d)? KB \(about \d+ tokens\)\.$/)
+  assert.match(plain(field?.takes ?? ''), /^\d+% of response · \d+ KB$/)
   assert.equal(card.fields.length, receipt.fields.length)
+  const text = [card.title, ...card.paragraphs, ...card.fields.map(one => `${one.label} · ${one.takes}`)].join('\n')
+  assert.doesNotMatch(text, /Claude read|Without|schema|40 rows/)
+  // This common one-contributor hover needs only three short lines at normal widths.
+  assert.equal(text.split('\n').length, 3)
+  assert.ok(text.length < 200)
 })
 
-test('a result kept out of the context says so in its card, and what it would take if read', () => {
+test('a saved-response receipt distinguishes inspected contents from a reported size', () => {
   const card = cardOf(receiptOf(savedOutcome(outcomeOf(SEARCH, mcp(issues(40, 1000)))), SEARCH)!)
-  assert.match(plain(card.title), /^context · \d+ KB saved to a file$/)
-  assert.match(card.paragraphs[0] ?? '', /kept this response out of Claude's context/)
-  assert.match(card.paragraphs[0] ?? '', /Claude saw only a short preview and the file's path/)
-  assert.match(plain(card.paragraphs[0] ?? ''), /Read in full, it would take about [\d.]+k tokens/)
-  assert.match(card.fields[0]?.without ?? '', /the saved file would be/)
+  assert.match(plain(card.title), /^Response size · \d+ KB saved to a file$/)
+  assert.match(card.paragraphs[0] ?? '', /Only a preview and file path were returned/)
+  assert.match(plain(card.paragraphs[0] ?? ''), /Full response: about [\d.]+k tokens \(estimated\)/)
+  assert.ok(card.fields.length > 0)
   const stood = cardOf(receiptOf(outcomeOf(SEARCH, '<persisted-output>\nOutput too large (58.2KB). Full output saved to: /Users/x/.claude/projects/-p/abc/tool-results/t.json\n</persisted-output>'), SEARCH)!)
-  assert.match(stood.paragraphs[0] ?? '', /did not read the file/)
+  assert.match(stood.paragraphs.join(' '), /file contents not inspected/)
+  assert.doesNotMatch(stood.paragraphs.join(' '), /Full response:|bytes ÷ 4/)
   assert.deepEqual(stood.fields, [])
 })
 
@@ -210,7 +211,7 @@ test('what the response wrote is escaped wherever the receipt says it: the line,
   const outcome = outcomeOf(ir, mcp({ data: { r: Array.from({ length: 30 }, () => ({ [key]: 'v'.repeat(900) })) } }))
   const receipt = receiptOf(outcome, ir)
   assert.ok(receipt !== undefined)
-  const said = [receipt.line, ...flagsOf(ir, outcome, true).flatMap(flag => [flag.text, flag.detail]), ...cardOf(receipt).fields.flatMap(field => [field.label, field.takes, field.without])].join('\n')
+  const said = [receipt.line, ...flagsOf(ir, outcome, true).flatMap(flag => [flag.text, flag.detail]), ...cardOf(receipt).fields.flatMap(field => [field.label, field.takes])].join('\n')
   assert.match(said, /key/)
   assert.doesNotMatch(said, /[\x00-\x08\x0b-\x1f\x7f-\x9f]/)
 })
@@ -225,13 +226,7 @@ test('the transcript\'s first line carries the size, and a result kept out of th
   assert.equal(resultBlockOf({ rows: [], errors: [], authLinks: [], isUnreadable: true, isTooLarge: true }, SEARCH, LINKS), undefined)
 })
 
-test('the standing line counts the bytes Claude read, after the calls, and says nothing of them when there are none', () => {
-  const none = { calls: 5, unasked: 0, rules: 0, isTrustOff: false, isTrustFileChanged: false }
-  assert.equal(statusLine({ ...none, bytes: 212 * 1024 }), 'Agent Services · 5 calls · 212 KB read')
-  assert.equal(statusLine({ ...none, bytes: 0 }), 'Agent Services · 5 calls')
-  assert.equal(statusLine(none), 'Agent Services · 5 calls')
-  assert.equal(statusLine({ ...none, bytes: 700, rules: 3, unasked: 2 }), 'Agent Services · 5 calls · 700 B read · 3 trust rules · 2 ran unasked')
-})
+
 
 // ---- The planner
 

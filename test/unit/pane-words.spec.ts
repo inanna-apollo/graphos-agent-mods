@@ -92,7 +92,7 @@ test('a name wraps at a word boundary beside its alias, or moves whole when no b
 
 test("a field's classification is said one way: the schema's, else the one Agent Services gave its denial", () => {
   const field = { name: 'email', coordinate: 'Member.email', path: 'members.email', args: [], children: [], policy: 'deny' as const }
-  const outcome = { rows: [], authLinks: [], errors: [{ message: '', isDenied: true, field: 'email', classification: 'pii-high', isRequestable: true }] } as never
+  const outcome = { rows: [], authLinks: [], errors: [{ message: '', isDenied: true, field: 'email', path: 'members.*.email', classification: 'pii-high', isRequestable: true }] } as never
   assert.equal(classificationNote(field, outcome), 'classified pii-high · requestable')
   assert.equal(classificationNote(field, outcome, false), 'classified pii-high')
   const classified = { ...field, schema: { type: 'String', isList: false, scopes: [], tags: [], hints: ['classified pii.contact'] } }

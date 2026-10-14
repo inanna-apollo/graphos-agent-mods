@@ -11,6 +11,7 @@ import { emojify } from '../emoji.ts'
 import { decodeEntities } from '../entities.ts'
 import { esc, humanPlural, humanSingular, humanType, limitOf } from './kit.ts'
 import type { RequestItem } from './kit.ts'
+import { denialFromError, observedDenials, responsePath } from '../denials.ts'
 import { receiptOf } from './receipt.ts'
 import { confirmText } from '../preview/confirm.ts'
 
@@ -67,24 +68,31 @@ export type PreviewItem = {
   text?: string
   extra?: string
   url?: string
-  denied?: { field: string; classification?: string; isRequestable?: boolean }[]
+  denied?: { field: string; path?: string; classification?: string; isRequestable?: boolean }[]
   /** For the hover card: every selected field in order; a denied one has `denial` and no value. */
-  fields?: { name: string; value?: string; denial?: { classification?: string; isRequestable?: boolean } }[]
+  fields?: { name: string; path?: string; value?: string; denial?: { classification?: string; isRequestable?: boolean } }[]
 }
 
 function fieldsShown(item: NonNullable<CallOutcome['preview']>[number]['items'][number]): PreviewItem['fields'] {
-  const denied = new Map((item.denied ?? []).map(one => [one.field, one] as const))
-  const listed = (item.fields ?? []).map(one => {
-    const tag = denied.get(one.name)
-    denied.delete(one.name)
+  const fields = item.fields ?? []
+  const denied = item.denied ?? []
+  const used = new Set<typeof denied[number]>()
+  const listed = fields.map(one => {
+    const matches = denied.filter(tag => one.path !== undefined && tag.path !== undefined
+      ? responsePath(one.path) === responsePath(tag.path)
+      : tag.field === one.name && fields.filter(field => field.name === one.name).length === 1 && denied.filter(candidate => candidate.field === one.name).length === 1)
+    const tag = matches.length === 1 ? matches[0] : undefined
+    if (tag !== undefined) used.add(tag)
     return {
       name: esc(one.name, 120),
+      ...(one.path !== undefined && { path: one.path }),
       ...(tag === undefined && one.value !== undefined && { value: said(one.value, 256) }),
       ...(tag !== undefined && { denial: { ...(tag.classification !== undefined && { classification: esc(tag.classification, 20) }), ...(tag.isRequestable !== undefined && { isRequestable: tag.isRequestable }) } }),
     }
   })
-  const rest = [...denied.values()].map(tag => ({
+  const rest = denied.filter(tag => !used.has(tag)).map(tag => ({
     name: esc(tag.field, 120),
+    ...(tag.path !== undefined && { path: tag.path }),
     denial: { ...(tag.classification !== undefined && { classification: esc(tag.classification, 20) }), ...(tag.isRequestable !== undefined && { isRequestable: tag.isRequestable }) },
   }))
   return [...listed, ...rest].slice(0, 12)
@@ -120,7 +128,7 @@ export function overLimit(outcome: CallOutcome | undefined, ir: CallIR | undefin
 /** Past what src/result.ts keeps of a row's label and summary (1,000 characters), escapes included: they are wrapped when drawn, not cut again. */
 const LABEL = 2000
 /** What a rows line says when no paging argument was set. */
-export const FIRST_PAGE = 'first page'
+export const FIRST_PAGE = 'first page requested'
 
 /** Boolean fields that say whether more rows remain, and what `true` means. */
 const MORE_FLAGS: Record<string, boolean> = { more: true, hasMoreResults: true, hasNextPage: true, isLast: false }
@@ -225,7 +233,7 @@ export function attributed(outcome: CallOutcome, ir?: CallIR): CallOutcome {
     const denied = item.denied ?? []
     if (!denied.some(one => one.field === field)) {
       if (denied.length >= 4) return true
-      item.denied = [...denied, { field, ...(error.classification !== undefined && { classification: error.classification }), ...(error.isRequestable !== undefined && { isRequestable: error.isRequestable }), ...(error.hasToken === true && { hasToken: true }) }]
+      item.denied = [...denied, { field, path: responsePath(error.path), ...(error.classification !== undefined && { classification: error.classification }), ...(error.isRequestable !== undefined && { isRequestable: error.isRequestable }), ...(error.hasToken === true && { hasToken: true }) }]
     }
     return false
   })
@@ -259,6 +267,7 @@ function rootNoun(root: FieldIR, service: string | undefined): string {
 export function resultLines(stored: CallOutcome | undefined, ir?: CallIR, links: LinkConfig = configOf()): ResultLine[] {
   if (stored === undefined) return []
   const outcome = attributed(stored, ir)
+  const denials = observedDenials(stored, ir?.roots)
   const lines: ResultLine[] = []
   // An unreadable or too-large response is a flag (src/view/flags.ts): RESULT does not say it again.
   for (const error of outcome.errors) {
@@ -267,26 +276,30 @@ export function resultLines(stored: CallOutcome | undefined, ir?: CallIR, links:
     const name = last === undefined || last === '' ? undefined : esc(last, 120)
     const items = itemsWords(error.count ?? 1, error.of)
     if (error.isDenied === true) {
+      const source = denialFromError(error, ir?.roots)
+      const observed = source?.path === undefined ? undefined : denials.find(one => one.path === source.path)
+      const classification = observed === undefined ? error.classification : observed.classification
+      const requestable = observed === undefined ? error.isRequestable : observed.isRequestable
       const facts = [
-        error.classification === undefined ? '' : esc(error.classification, 20),
-        error.isRequestable === undefined ? '' : error.isRequestable ? 'requestable' : 'not requestable',
+        classification === undefined ? '' : esc(classification, 20),
+        requestable === undefined ? '' : requestable ? 'requestable' : 'not requestable',
       ].filter(Boolean)
       const head = name === undefined ? 'denied' : `${name} denied${items}`
-      const classification = error.classification === undefined ? '' : esc(error.classification, 20)
       lines.push({
         kind: 'error',
         isDenied: true,
         text: [head, ...facts].join(GLYPH_SEP),
         head,
-        facts: classification,
-        ...(error.isRequestable === true &&
+        facts: classification === undefined ? '' : esc(classification, 20),
+        ...(observed?.hasToken === true && observed.isRequestable === true && observed.path !== undefined &&
           name !== undefined && {
             request: {
               what: `\`${name}\``,
-              ...(error.coord !== undefined && { coord: esc(error.coord, 200) }),
-              ...(error.service !== undefined && { service: esc(error.service, 63) }),
-              ...(classification !== '' && { classification }),
-              ...(error.reason !== undefined && { reason: esc(error.reason, 300) }),
+              path: observed.path,
+              ...(observed.coord !== undefined && { coord: esc(observed.coord, 200) }),
+              ...(observed.service !== undefined && { service: esc(observed.service, 63) }),
+              ...(observed.classification !== undefined && { classification: esc(observed.classification, 20) }),
+              ...(observed.reason !== undefined && { reason: esc(observed.reason, 300) }),
             },
           }),
       })
@@ -332,7 +345,7 @@ export function resultLines(stored: CallOutcome | undefined, ir?: CallIR, links:
     if (flag !== undefined) joined.add(flag)
     const over = owning === undefined ? undefined : overLimit(outcome, ir, owning)
     // More than the limit asked for is a flag; here the number alone takes the warning tone.
-    const note = [isFirstPage ? FIRST_PAGE : '', flag?.short ?? ''].filter(Boolean).join(GLYPH_SEP)
+    const note = [isFirstPage ? FIRST_PAGE : '', flag?.short ?? (owning?.paging !== undefined ? 'continuation unknown' : '')].filter(Boolean).join(GLYPH_SEP)
     const base = row.total === undefined || (row.total === 0 && row.count === 0) ? count : `${count} of ${grouped(row.total)}`
     // The items in words after the number they follow: the root's own item type when the root is the list (`4 members`), else the list's name (`5 issues`, `1 issue`).
     const isOwnList = owning !== undefined && owning.name === row.field
@@ -368,6 +381,7 @@ export function resultLines(stored: CallOutcome | undefined, ir?: CallIR, links:
             ...(item.denied !== undefined && item.denied.length > 0 && {
               denied: item.denied.slice(0, 4).map(one => ({
                 field: esc(one.field, 120),
+                ...(one.path !== undefined && { path: one.path }),
                 ...(one.classification !== undefined && { classification: esc(one.classification, 20) }),
                 ...(one.isRequestable !== undefined && { isRequestable: one.isRequestable }),
               })),

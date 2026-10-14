@@ -1,4 +1,4 @@
-// Field annotations indexed by schema coordinate. Pure: no $.
+// Field annotations indexed by selected response path. Pure: no $.
 // src/attention.ts computes the marker and reason. The view draws annotations
 // beside visible fields and omits annotations for hidden fields.
 
@@ -13,7 +13,7 @@ export type Pinned = { note: string; isAttention: boolean; isPersonal: boolean }
 export type AnnotationLevel = 'attention' | 'none'
 
 export type AnnotationIndex = {
-  field: (coordinate: string) => Pinned | undefined
+  field: (path: string) => Pinned | undefined
 }
 
 /** Attention reasons are short. */
@@ -22,10 +22,10 @@ const NOTE = 80
 export function annotationIndex(ir: CallIR | undefined, level: AnnotationLevel = 'attention', outcome?: CallOutcome): AnnotationIndex {
   const fields = new Map<string, Pinned>()
   if (ir !== undefined && level !== 'none') {
-    for (const { coordinate, reason } of attentionOf(ir, outcome)) fields.set(coordinate, { note: esc(reason, NOTE), isAttention: true, isPersonal: reason.split(' · ')[0] === PERSONAL_DATA })
+    for (const { path, reason } of attentionOf(ir, outcome)) fields.set(path, { note: esc(reason, NOTE), isAttention: true, isPersonal: reason.split(' · ')[0] === PERSONAL_DATA })
   }
   return {
-    field: coordinate => fields.get(coordinate),
+    field: path => fields.get(path),
   }
 }
 

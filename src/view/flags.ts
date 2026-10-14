@@ -11,11 +11,13 @@ import type { CallIR, CallOutcome, FieldIR } from '../ir.ts'
 import { isDestructiveName, isWriteName } from '../risk.ts'
 import { esc, humanPlural, humanType, walk } from './kit.ts'
 import type { RequestItem } from './kit.ts'
-import { grouped, overLimit, ownerOf } from './outcome.ts'
+import { grouped, overLimit } from './outcome.ts'
 import { held, receiptOf } from './receipt.ts'
 import { sizeText, tokensText } from '../weight.ts'
 import { previewFlags, previewOf } from '../preview/changes.ts'
-import { classificationOf } from '../attention.ts'
+import { classifiedOf } from './personal.ts'
+import { observedDenials } from '../denials.ts'
+import type { ObservedDenial } from '../denials.ts'
 
 export type Flag = {
   /** Short, escaped: what the line says. */
@@ -104,45 +106,6 @@ function nounOf(root: FieldIR, count: number, scope: string | undefined, listPat
   return type === undefined ? undefined : esc(humanPlural(humanType(type, root.service ?? scope), count), 120)
 }
 
-/**
- * What Agent Services denied of `name` under `root` once the call ran: in how many
- * distinct rows (the outcome's tally; undefined when the root is not a list,
- * or the outcome kept none), and what the denials said, from its errors and
- * the rows it shows.
- */
-function deniedIn(outcome: CallOutcome, root: FieldIR, name: string) {
-  const tally = outcome.denials?.find(one => one.root === root.path && one.field === name)
-  const errors = outcome.errors.filter(error => error.isDenied === true && error.field === name && (error.path === undefined || error.path.split('.')[0] === root.path))
-  const lists = (outcome.preview ?? []).filter(list => ownerOf([root], list) !== undefined)
-  const tags = lists.flatMap(list => list.items.flatMap(item => (item.denied ?? []).filter(one => one.field === name || one.field.endsWith(`.${name}`))))
-  const all = [...errors, ...tags]
-  return {
-    rows: tally?.rows,
-    list: tally?.list,
-    // A denial that said it is not requestable means a request for the field would be refused.
-    isRequestable: all.some(one => one.isRequestable === true) && !all.some(one => one.isRequestable === false),
-    isPrivate: all.some(one => one.isRequestable === false),
-    hasToken: all.some(one => one.hasToken === true),
-    classification: all.find(one => one.classification !== undefined)?.classification,
-    // What the denial token said of the field, for the request's draft: the tally's, else a listed error's.
-    coord: tally?.coord ?? errors.find(one => one.coord !== undefined)?.coord,
-    service: tally?.service ?? errors.find(one => one.service !== undefined)?.service,
-    reason: tally?.reason ?? errors.find(one => one.reason !== undefined)?.reason,
-  }
-}
-
-/** Why a background check failed, in a few plain words; undefined for an error with no known cause (the card has it). */
-const NOT_ALLOWED = 'the read-only tools are not allowed'
-
-export function checkFailureWords(error: string | undefined): string | undefined {
-  if (error === undefined || error === '') return undefined
-  if (/doesn't want to proceed|rejected|refused|interrupt|abort|cancel/i.test(error)) return 'the call was stopped'
-  if (/not allowed without a prompt|permission/i.test(error)) return NOT_ALLOWED
-  if (/time(d)? ?out|no answer/i.test(error)) return 'no answer in time'
-  if (/sign.?in|auth/i.test(error)) return 'a sign-in is needed'
-  return undefined
-}
-
 /** Without a token the person can still ask for access, but nothing here can file it. */
 const requestable = (isRequestable: boolean) => (isRequestable ? 'access requestable' : undefined)
 
@@ -154,27 +117,31 @@ function requestWhat(root: FieldIR, field: FieldIR | string, noun: string | unde
 }
 
 /** A denied field once the call ran: how many rows it cost, and whether a request can be filed for it. */
-function deniedFlag(ir: CallIR, outcome: CallOutcome, root: FieldIR, field: FieldIR | string): Flag {
-  const name = esc(typeof field === 'string' ? field : field.name, 120)
-  const got = deniedIn(outcome, root, typeof field === 'string' ? field : field.name)
-  const noun = got.rows === undefined ? undefined : nounOf(root, got.rows, ir.service, got.list)
+function deniedFlag(ir: CallIR, outcome: CallOutcome, got: ObservedDenial, isRepeated: boolean): Flag {
+  const root = ir.roots.find(root => root.path === got.root)
+  const field = got.field
+  const relative = root !== undefined && ir.roots.length === 1 && got.path?.startsWith(`${root.path}.`) ? got.path.slice(root.path.length + 1) : got.path
+  const name = esc(isRepeated ? relative ?? got.name : got.name, 240)
+  const noun = got.rows === undefined || root === undefined ? undefined : nounOf(root, got.rows, ir.service, got.list)
   // Only a token the execute response itself carried can be filed; and not for a denial that said it is not requestable.
-  const canFile = got.hasToken && !got.isPrivate
-  const how = canFile ? REQUEST_TEXT : requestable(got.isRequestable)
+  const canFile = got.path !== undefined && got.hasToken && got.isRequestable !== false
+  const how = canFile ? REQUEST_TEXT : requestable(got.isRequestable === true && got.path !== undefined)
   const text = got.rows === undefined ? `${name} denied` : `${name} denied for ${grouped(got.rows)} ${noun ?? `row${got.rows === 1 ? '' : 's'}`}`
   // One classification, said as the cards say it: the schema's, else the one Agent Services gave the denial.
-  const classification = typeof field === 'string' ? got.classification : (classificationOf(field, outcome) ?? got.classification)
+  const classification = field === undefined ? got.classification : (classifiedOf(field) ?? got.classification)
+  const location = got.path === undefined ? `${got.root === undefined ? '' : `${esc(got.root, 240)}: `}${name} (exact response location not retained)` : esc(got.path, 240)
   const detail = [
-    `${pathOf(root, field)} denied by policy`,
+    `${location} denied in the execution response`,
     classification === undefined ? '' : `classified ${esc(classification, 40)}`,
     got.rows === undefined ? '' : `missing from ${grouped(got.rows)} ${noun ?? 'rows'}`,
-    got.isPrivate ? 'not requestable' : (how ?? ''),
+    got.isRequestable === false ? 'not requestable' : (how ?? ''),
   ]
     .filter(Boolean)
     .join(' · ')
-  const what = requestWhat(root, field, nounOf(root, 2, ir.service, got.list))
+  const what = root === undefined ? `\`${location}\`` : requestWhat(root, field ?? got.path ?? got.name, nounOf(root, 2, ir.service, got.list))
   const request: RequestItem = {
     what,
+    ...(got.path !== undefined && { path: got.path }),
     ...(got.coord !== undefined && { coord: esc(got.coord, 200) }),
     ...(got.service !== undefined && { service: esc(got.service, 63) }),
     ...(classification !== undefined && { classification: esc(classification, 40) }),
@@ -183,25 +150,10 @@ function deniedFlag(ir: CallIR, outcome: CallOutcome, root: FieldIR, field: Fiel
   return { text: canFile || how === undefined ? text : `${text} · ${how}`, detail, tone: 'deny', ...(canFile && { request }) }
 }
 
-/** The (root key, field name) pairs Agent Services denied in the response, in the order it said them: its tally, its errors, then the rows shown. */
-function deniedPairs(ir: CallIR, outcome: CallOutcome): [string, string][] {
-  const pairs = new Map<string, [string, string]>()
-  const add = (rootKey: string | undefined, name: string | undefined) => {
-    if (rootKey !== undefined && name !== undefined && name !== '') pairs.set(`${rootKey}\u0000${name}`, [rootKey, name])
-  }
-  for (const one of outcome.denials ?? []) add(one.root, one.field)
-  for (const error of outcome.errors) if (error.isDenied === true) add(error.path?.split('.')[0], error.field)
-  for (const list of outcome.preview ?? []) {
-    const rootKey = list.root ?? ownerOf(ir.roots, list)?.path
-    for (const item of list.items) for (const tag of item.denied ?? []) add(rootKey, tag.field.split('.').pop())
-  }
-  return [...pairs.values()]
-}
-
 /** The flags, most important first; empty when nothing is unusual. `outcome` only for a call that ran. */
 export function flagsOf(ir: CallIR, outcome?: CallOutcome, isSettled = false): Flag[] {
   const flags: Flag[] = []
-  if (ir.isOperationDenied === true) flags.push({ text: 'policy denies the whole operation', detail: 'dry_run refused the whole operation for your role: nothing will come back', tone: 'deny' })
+  if (!isSettled && outcome === undefined && ir.isOperationDenied === true) flags.push({ text: 'operation refusal reported by dry_run', detail: 'The earlier access check reported an operation refusal. For a multi-service call or a batch, this may apply to only one checked operation; it does not establish the outcome of every request.', tone: 'deny' })
 
   // A write's CHANGES block says that it writes, and a delete's says what goes: the flags line does not say it again.
   const blocks = new Map((previewOf(ir)?.all ?? []).map(block => [block.path, block] as const))
@@ -226,32 +178,21 @@ export function flagsOf(ir: CallIR, outcome?: CallOutcome, isSettled = false): F
     flags.push({ text: `link ${service} to read it`, detail: `${service} needs your account linked before Agent Services can read it (UPSTREAM_AUTH_REQUIRED); the link is under RESULT`, tone: 'warn' })
   }
 
-  // Policy: a denied field once per root, with what it cost there once the call ran; a masked one once per name. A denied or masked object is one field (policyUnits).
-  const seen = new Set<string>()
-  for (const root of ir.roots) {
+  // Pending flags describe the rehearsal. Once execute answers, only its
+  // observed denials describe the result; predictions stay in check details.
+  for (const root of !isSettled && outcome === undefined ? ir.roots : []) {
     for (const field of policyUnits([root])) {
       if (field.policy !== 'deny' && field.policy !== 'mask') continue
-      const name = esc(field.name, 120)
-      const key = field.policy === 'mask' ? `mask:${isSettled ? name : pathOf(root, field)}` : `deny:${root.path}:${field.name}`
-      if (seen.has(key)) continue
-      seen.add(key)
       if (field.policy === 'mask') {
-        flags.push({ text: `${isSettled ? name : pathOf(root, field)} masked`, detail: `${pathOf(root, field)} comes back masked for your role`, tone: 'mask' })
-      } else if (outcome !== undefined) {
-        flags.push(deniedFlag(ir, outcome, root, field))
+        flags.push({ text: `${pathOf(root, field)} masked`, detail: `dry_run reports masking for ${pathOf(root, field)}. This is an access-check decision, not an observed execution result.`, tone: 'mask' })
       } else {
-        flags.push({ text: `${pathOf(root, field)} denied`, detail: `${pathOf(root, field)} is denied for your role: it comes back null`, tone: 'deny' })
+        flags.push({ text: `${pathOf(root, field)} denied`, detail: `dry_run reports denial for ${pathOf(root, field)}. This is an access-check decision, not an observed execution result.`, tone: 'deny' })
       }
     }
   }
-  // What Agent Services denied that the policy check did not say it would: a flag all the same.
   if (outcome !== undefined) {
-    for (const [rootKey, name] of deniedPairs(ir, outcome)) {
-      const root = ir.roots.find(one => one.path === rootKey)
-      if (root === undefined || seen.has(`deny:${root.path}:${name}`)) continue
-      seen.add(`deny:${root.path}:${name}`)
-      flags.push(deniedFlag(ir, outcome, root, walk([root]).find(one => one.name === name) ?? name))
-    }
+    const selected = walk(ir.roots)
+    for (const denied of observedDenials(outcome, ir.roots)) flags.push(deniedFlag(ir, outcome, denied, selected.filter(field => field.name === denied.name).length > 1))
   }
 
   if (outcome?.isUnreadable === true) {
@@ -292,20 +233,6 @@ export function flagsOf(ir: CallIR, outcome?: CallOutcome, isSettled = false): F
     })
   }
 
-  const checks = ir.checks
-  // A check that failed says why in a few plain words; the error itself (a diagnostic blob, the plugin's and the engine's words) is the card's, whole.
-  const failed = [checks?.policy === 'failed' ? 'policy' : '', checks?.schema === 'failed' ? 'schema' : ''].filter(Boolean)
-  if (failed.length > 0) {
-    const raw = checks?.error === undefined ? undefined : checks.error.replace(/\s+/g, ' ').trim()
-    const why = checkFailureWords(raw)
-    flags.push({
-      text: `${failed.join(' and ')} not checked${why === undefined ? '' : `: ${why}`}`,
-      detail: why === NOT_ALLOWED
-        ? `The pane checks a call's ${failed.join(' and ')} with Agent Services' read-only tools (search, introspect, validate and dry_run), and only where your permission settings already allow them, so it never adds a dialog of its own. To have it check, allow them in /permissions, or choose "don't ask again" when Claude itself first uses one. None of them changes data.`
-        : `Agent Services could not check this call's ${failed.join(' or ')}${raw === undefined ? '.' : `. The error: ${esc(raw, 600)}`}`,
-      tone: 'warn',
-    })
-  }
   return flags
 }
 
@@ -333,12 +260,13 @@ const listed = (items: readonly string[]) => (items.length <= 1 ? (items[0] ?? '
  * the denial token or the call said, escaped where it was kept.
  */
 export function requestDraftFor(items: readonly RequestItem[], opName: string | undefined): string | undefined {
-  const unique = items.filter((item, at) => items.findIndex(other => other.what === item.what) === at)
+  const identity = (item: RequestItem) => JSON.stringify([item.service, item.coord, item.path, item.coord === undefined && item.path === undefined ? item.what : undefined])
+  const unique = items.filter((item, at) => items.findIndex(other => identity(other) === identity(item)) === at)
   if (unique.length === 0) return undefined
   const call = opName === undefined ? 'the Agent Services call that denied it' : `the ${esc(opName, 120)} call`
   const whats = listed(unique.map(item => item.what))
   const services = [...new Set(unique.flatMap(item => (item.service === undefined ? [] : [item.service])))]
-  const fields = unique.map(item => item.coord ?? item.what.replace(/^`([^`]+)`.*$/, '$1'))
+  const fields = [...new Set(unique.map(item => item.coord ?? item.what.replace(/^`([^`]+)`.*$/, '$1')))]
   const service = services.length === 0 ? 'the service_name inside the denial token' : services.length === 1 ? quoted(services[0] ?? '') : `${services.map(quoted).join(' or ')} (one request per service)`
   const classes = [...new Set(unique.flatMap(item => (item.classification === undefined ? [] : [item.classification])))]
   const reasons = [...new Set(unique.flatMap(item => (item.reason === undefined ? [] : [item.reason])))]

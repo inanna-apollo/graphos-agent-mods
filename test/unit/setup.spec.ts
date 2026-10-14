@@ -38,10 +38,13 @@ test('a finished setup says it is ready, in one line, and nothing else to do', (
   assert.equal(setupReport({ ...DONE, trust: { ...DONE.trust, count: 0 } }), READY)
 })
 
-test('an older Claude Code is a step that says claude update; an unreadable one says how to check; a development build is no step', () => {
-  assert.match(steps(setupReport({ ...DONE, version: { version: '2.1.288', base: '2.1.288' } }))[0] ?? '', /needs Claude Code 2\.1\.290 or later \(this is 2\.1\.288\).*claude update/)
+test('an older Claude Code names both update paths; an unreadable one says how to check; a development build is no step', () => {
+  const older = steps(setupReport({ ...DONE, version: { version: '2.1.288', base: '2.1.288' } }))[0] ?? ''
+  assert.match(older, /needs Claude Code 2\.1\.290 or later \(this is 2\.1\.288\)/)
+  assert.match(older, /Desktop Code.*update the app.*new Local session/)
+  assert.match(older, /terminal Claude Code.*claude update/)
   const unreadable = steps(setupReport({ ...DONE, version: undefined }))
-  assert.match(unreadable[0] ?? '', /claude --version.*claude update/)
+  assert.match(unreadable[0] ?? '', /\/status in Desktop Code.*claude --version.*terminal/)
   assert.ok((unreadable[0] ?? '').includes(MIN_CLAUDE_CODE))
   assert.equal(setupReport({ ...DONE, version: { version: '2.1.300-dev.20261001.t1.sha1', base: '2.1.300-dev' } }), setupReport(DONE))
 })
@@ -66,7 +69,7 @@ test('the read-only tools are never a step: not allowed, denied or capped, the r
     // No tool ids: the note names the tools.
     assert.doesNotMatch(report, /mcp__/)
   }
-  assert.match(setupReport({ ...DONE, tools: tools('ask') }), /Optional: allow.*\/permissions/)
+  assert.match(setupReport({ ...DONE, tools: tools('ask') }), /Optional: allow.*\/permissions in terminal Claude Code.*Desktop Code.*shared settings file.*standalone CLI/)
   // A server name is escaped where two servers are told apart.
   assert.doesNotMatch(setupReport({ ...DONE, servers: [SERVER, 'second\x1b[31m'], tools: [...tools('allow'), ...tools('ask', 'second\x1b[31m')] }), /\x1b/)
 })

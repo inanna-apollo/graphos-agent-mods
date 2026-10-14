@@ -7,7 +7,11 @@ import type { RenderNode } from 'claude-code'
 import type { Kit } from './kit.ts'
 import { cellWidth } from './plan.ts'
 import { markdownLink } from './ui/preview-cards.tsx'
-import { COLOR, GLYPH, STRUCT, struct } from './ui/index.tsx'
+import { GLYPH, struct } from './ui/index.tsx'
+
+// Transcript content stays on Claude's canvas and follows its theme.
+const STRUCT = { bar: 'autoAccept', result: 'text', number: 'planMode' } as const
+const COLOR = { link: 'ide' } as const
 import type { ResultBlock } from './transcript.ts'
 
 /** Cells before the bar: under the text of the verdict line above (`  ⎿  `). */

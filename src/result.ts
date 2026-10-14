@@ -14,6 +14,7 @@ import { configOf, recordLinkOf, serviceOf } from './links.ts'
 import type { LinkConfig } from './links.ts'
 import { persistedWeight, weightOf } from './weight.ts'
 import { confirmOf } from './preview/confirm.ts'
+import { responsePath } from './denials.ts'
 
 /** The response text: a string, MCP content blocks (`[{ type: 'text', text }]`, as core relays an MCP result), or `{ content }`. */
 function textOf(result: unknown): string | undefined {
@@ -147,9 +148,10 @@ function tagItem(ir: CallIR, slots: readonly Slot[], segments: readonly string[]
     const field = names.join('.')
     const denied = item.denied ?? []
     // Tagged on every kept row; it stands as a RESULT line too unless the row is among those shown before the list is opened out.
-    if (denied.some(one => one.field === field)) return position < PREVIEW_SHOWN
+    const path = responsePath(segments.join('.'))
+    if (denied.some(one => one.path === path)) return position < PREVIEW_SHOWN
     if (denied.length >= MAX_DENIED_TAGS) return false
-    item.denied = [...denied, { field, ...tag }]
+    item.denied = [...denied, { field, path, ...tag }]
     return position < PREVIEW_SHOWN
   }
   return false
@@ -279,14 +281,14 @@ function fieldsOf(item: Record<string, unknown>, listField: FieldIR): NonNullabl
     if (isRecord(value) && child.children.length > 0) {
       for (const inner of child.children) {
         const text = scalarText(value[keyOf(inner)])
-        if (text !== undefined) found.push({ name: `${child.name}.${inner.name}`, value: text })
+        if (text !== undefined) found.push({ name: `${child.name}.${inner.name}`, value: text, ...((child.alias !== undefined || inner.alias !== undefined) && { path: inner.path }) })
       }
     } else if (isRecord(value)) {
       // A leaf with an object value is opaque JSON: GraphQL would make an object type take a selection.
       found.push(...jsonFields(child.name, value, MAX_FIELDS - found.length))
     } else {
       const text = scalarText(value)
-      if (text !== undefined) found.push({ name: child.name, value: text })
+      if (text !== undefined) found.push({ name: child.name, value: text, ...(child.alias !== undefined && { path: child.path }) })
     }
   }
   return found.slice(0, MAX_FIELDS)
@@ -522,7 +524,7 @@ const REASON_MAX = 300
  * checked against its own shape and bounded. Ids, rule ids and the token
  * itself are never kept. A malformed token reads as nothing.
  */
-export function denialFactsOf(token: string, field?: string): DenialFacts {
+export function denialFactsOf(token: string, field?: string, coordinate?: string): DenialFacts {
   if (token.length > MAX_TOKEN) return {}
   const payload = token.split('.')[1]
   if (payload === undefined) return {}
@@ -536,8 +538,10 @@ export function denialFactsOf(token: string, field?: string): DenialFacts {
   }
   if (!isRecord(parsed)) return {}
   const blocked = Array.isArray(parsed.blocked_fields) ? parsed.blocked_fields.filter(isRecord) : []
-  const own = blocked.find(one => typeof one.coord === 'string' && field !== undefined && one.coord.endsWith(`.${field}`))
-  const chosen = own ?? (blocked.length === 1 ? blocked[0] : undefined)
+  const matches = blocked.filter(one => typeof one.coord === 'string' && (coordinate !== undefined ? one.coord === coordinate : field !== undefined && one.coord.endsWith(`.${field}`)))
+  // Repeated leaf names do not identify a schema field. Even a single token
+  // claim must match the known coordinate; a denial still exists without it.
+  const chosen = matches.length === 1 ? matches[0] : coordinate === undefined && field === undefined && blocked.length === 1 ? blocked[0] : undefined
   const { classification, coord, reason } = chosen ?? {}
   const service = parsed.service_name
   return {
@@ -558,17 +562,17 @@ function listLength(data: Record<string, unknown> | undefined, segments: readonl
 }
 
 /** What the denials of one field came to under one root, while the errors are read. */
-type Tally = { root: string; field: string; rows: Set<string>; list?: string; of?: number; classification?: string; coord?: string; service?: string; reason?: string; isRequestable: boolean; isPrivate: boolean; hasToken: boolean }
+type Tally = { root: string; field: string; path: string; rows: Set<string>; list?: string; of?: number; classification?: string; coord?: string; service?: string; reason?: string; isRequestable: boolean; isPrivate: boolean; hasToken: boolean }
 
 const MAX_TALLY_ROWS = 100_000
-/** Most (root, field) pairs tallied: what is kept in $.state stays bounded however many fields a response denies. */
+/** Most denied response paths tallied: retained state stays bounded. */
 const MAX_TALLIES = 100
 
 /**
- * Folds one denial into the tally of its field under its root. A row is the
+ * Folds one denial into the tally of its exact response path. A row is the
  * innermost list item the field sits in (`teams.0.members.2` for
- * `teams.0.members.2.email`), so a field denied twice in one row, by two
- * paths (`creator.user.email`, `assignee.user.email`), is one row; a path
+ * `teams.0.members.2.email`), so repeated errors for that path count once;
+ * `creator.user.email` and `assignee.user.email` remain distinct. A path
  * with no list index belongs to a root that is not a list, and has no rows.
  */
 function tallyDenial(
@@ -580,9 +584,10 @@ function tallyDenial(
 ): void {
   const root = segments[0]
   if (root === undefined) return
-  const key = `${root}\u0000${field}`
+  const path = responsePath(segments.join('.'))
+  const key = path
   if (tallies.size >= MAX_TALLIES && !tallies.has(key)) return
-  const tally = tallies.get(key) ?? { root, field, rows: new Set<string>(), isRequestable: false, isPrivate: false, hasToken: false }
+  const tally = tallies.get(key) ?? { root, field, path, rows: new Set<string>(), isRequestable: false, isPrivate: false, hasToken: false }
   tallies.set(key, tally)
   let last = -1
   segments.forEach((segment, at) => {
@@ -733,7 +738,9 @@ export function outcomeOf(ir: CallIR, result: unknown, config: LinkConfig = conf
     const isDenied = typeof extensions.denial_context === 'string' || code === 'CONSTELLATION_ACCESS_DENIED'
     const keys = segments?.filter(segment => !isIndex(segment))
     const name = keys === undefined || keys.length === 0 ? undefined : (fieldAt(ir, keys.join('.'))?.name ?? keys[keys.length - 1])
-    const facts = isDenied && typeof extensions.denial_context === 'string' ? denialFactsOf(extensions.denial_context, name) : {}
+    const selected = keys === undefined ? undefined : fieldAt(ir, keys.join('.'))
+    const coordinate = selected?.schema === undefined ? undefined : selected.coordinate
+    const facts = isDenied && typeof extensions.denial_context === 'string' ? denialFactsOf(extensions.denial_context, name, coordinate) : {}
     const classification = facts.classification
     if (isDenied && segments !== undefined && name !== undefined) tallyDenial(tallies, segments, name, data, { classification, visibility: extensions.visibility, hasToken: typeof extensions.denial_context === 'string', facts })
     const isExpected = isDenied && keys !== undefined && fieldAt(ir, keys.join('.'))?.policy === 'deny'
@@ -788,15 +795,17 @@ export function outcomeOf(ir: CallIR, result: unknown, config: LinkConfig = conf
   for (const slot of found?.slots ?? []) {
     for (const item of slot.items) {
       for (const tag of item.denied ?? []) {
-        const own = item.fields?.find(one => one.name === tag.field)
+        const matches = (item.fields ?? []).filter(one => one.path !== undefined ? one.path === tag.path : one.name === tag.field)
+        const own = matches.length === 1 ? matches[0] : undefined
         if (own !== undefined) delete own.value
-        else if ((item.fields?.length ?? 0) < MAX_FIELDS) item.fields = [...(item.fields ?? []), { name: tag.field }]
+        else if ((item.fields?.length ?? 0) < MAX_FIELDS) item.fields = [...(item.fields ?? []), { name: tag.field, ...(tag.path !== undefined && { path: tag.path }) }]
       }
     }
   }
   const denials = [...tallies.values()].map(tally => ({
     root: tally.root,
     field: tally.field,
+    path: tally.path,
     ...(tally.rows.size > 0 && { rows: tally.of === undefined ? tally.rows.size : Math.min(tally.rows.size, tally.of) }),
     ...(tally.rows.size > 0 && tally.of !== undefined && { of: tally.of }),
     ...(tally.list !== undefined && { list: tally.list }),

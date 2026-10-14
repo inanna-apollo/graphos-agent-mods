@@ -11,6 +11,8 @@ import { rowKey } from '../src/view/plan.ts'
 import { walk } from '../src/view/kit.ts'
 import { batchCall, directoryCall, gnarlyCall, heavyCall, keptOutCall, persistedCall, relayCall, reviewCall, titlesCall } from './review-fixtures.ts'
 import { deleteCall, editCall, pageCall, postCall, transitionCall, unmappedCall } from './write-fixtures.ts'
+import { catalogCall, dryRunCall, introspectCall, invalidCall, searchCall, validCall } from './lookup-fixtures.ts'
+import { subjectOf } from '../src/view/kinds.ts'
 import { LINKS } from '../test/unit/link-fixture.ts'
 import { buildIR } from '../src/build.ts'
 import { normalize } from '../src/normalize.ts'
@@ -54,6 +56,16 @@ const CALLS = {
   pluginMade,
   directory: directoryCall,
   relay: relayCall,
+  // Claude's lookups: each kind settled, and the ones that draw a form while they wait.
+  search: () => searchCall(),
+  searchPending: () => searchCall('pending'),
+  catalog: catalogCall,
+  introspect: () => introspectCall(),
+  invalid: () => invalidCall(),
+  invalidPending: () => invalidCall('pending'),
+  valid: validCall,
+  dryRun: () => dryRunCall(),
+  dryRunPending: () => dryRunCall('pending'),
 } as const
 
 /** A sweep draws a pane at every width: seconds of work, which a busy machine stretches past the default 5 s. */
@@ -110,11 +122,13 @@ function isTriggerAt(id: string, rows: readonly string[], at: { row: number; row
   if (kind === 'l') return first.startsWith('↗')
   if (kind === 'o') return /… \d+ fields?/.test(first)
   if (kind === 'a') return spanned.includes(key.slice(key.lastIndexOf('.') + 1))
-  if (kind === 'b' || kind === 's') return /^ ?(READ|WRITE|WATCH) +\S/.test(first)
-  if (kind === 'n') return spanned.includes(call.ir.opName ?? '')
-  if (kind === 'w') return /✓ ran|ran ·|errors|failed|denied|\d+ of \d+/.test(first)
-  if (kind === 'c') return first.startsWith('summary · Haiku')
-  if (kind === 'u') return /^[✓·] /.test(first)
+  if (kind === 'b' || kind === 's') return /^ ?(READ|WRITE|WATCH|SEARCH|INTROSPECT|VALIDATE|DRY RUN)( +\S| *$)/.test(first)
+  if (kind === 'n') return spanned.includes((subjectOf(call) ?? call.ir.opName ?? '').replace(/\s+/g, ''))
+  if (kind === 'w') return /✓ ran|ran ·|errors|failed|denied|\d+ of \d+|found|matches?|unavailable|services?\b|fields?\b|valid|checked|not found/.test(first)
+  // A note with a card: its glyph opens the row.
+  if (kind === 'q') return /^\S /.test(first)
+  if (kind === 'c') return first.includes('Haiku')
+  if (kind === 'u') return key === 'checks' ? first.includes('Checks') : /^[✓·] /.test(first)
   if (kind === 'p') return /^↳ from (subagent|the\b)/.test(first)
   if (kind === 'h') return /^(┃ RESULT| {2}\S)/.test(first)
   // The context line: a size (and its tokens), or that the response was saved to a file.
@@ -124,7 +138,7 @@ function isTriggerAt(id: string, rows: readonly string[], at: { row: number; row
   if (kind === 'z') return /^ {2}[+\-±] \S/.test(first) || /^ {4}\S/.test(first)
   // RESULT's confirmation line.
   if (kind === 'v') return /✓|came back|created/.test(first)
-  if (kind === 'r' || call.ir.roots.some(root => root.path === key)) return first.startsWith('┃ ')
+  if (kind === 'r' || call.ir.roots.some(root => root.path === key)) return call.tool === 'search' ? field !== undefined && spanned.includes(field.name) : first.startsWith('┃ ')
   return field !== undefined && spanned.includes(field.name)
 }
 
@@ -157,7 +171,7 @@ for (const [name, make] of Object.entries(CALLS)) {
 }
 
 test(`a past call stepped back to keeps its status and its whole operation name in the header, the plan counting the rows, at every width from ${TOTAL_FROM} to 100`, { timeoutMs: SWEEP_MS }, () => {
-  const nav = { count: 12, position: 6, isLive: false, older: 4, newer: 6 }
+  const nav = { count: 12, position: 6, isLive: false, older: { kind: 'call' as const, id: 'older-4' }, newer: { kind: 'call' as const, id: 'newer-6' } }
   for (const make of [() => reviewCall('ran'), () => gnarlyCall('ran')]) {
     for (let columns = TOTAL_FROM; columns <= 100; columns++) {
       const call = make()

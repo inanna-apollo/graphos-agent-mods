@@ -1,0 +1,13 @@
+# Ten-minute GraphOS Inspector demo
+
+Use a connected GraphOS Agent Services account and a project or service whose read-only data you may show. Check Claude Code is at least 2.1.290, install the marketplace plugin as in the [README](../README.md#install), and confirm `/gas setup` reports the connector. Keep the terminal wide enough for the pane. Claude Desktop's local Code tab is optional; the terminal is the fallback if its pane or link controls are unavailable.
+
+| Time | Show | Prompt or action |
+| --- | --- | --- |
+| 0–2 min | Open the Inspector | Run `/gas` before asking Claude to use Agent Services. This keeps allowed discovery calls visible even if no permission dialog appears. If the pane does not open automatically later, run `/gas` again and use the transcript verdicts. |
+| 2–4 min | Discover the schema | Ask: “Using only the claude.ai GraphOS Agent Services connector, search for a read-only operation that lists a small set of records in a service I can demo. Introspect its required arguments and return type. Explain what the schema declares. Stop before `execute`.” Point out the SEARCH and INTROSPECT entries as they settle. |
+| 4–7 min | Check and run a named read | Ask: “Prepare a **named query** for at most three records using the operation you found. Select a stable identifier and one or two useful display fields. Use `validate` and `dry_run` if available. Show me the query and stop before `execute`. Do not perform a mutation or file an access request.” Review the query, then ask Claude to execute that exact read. If a permission dialog appears, approve only that read. Show its RESULT rows and response-size estimate. Click one actual record link if the result provides one and the destination is appropriate to show. |
+| 7–9 min | Explain a real restriction, if present | If Agent Services actually masks or denies a field in this read, show the observed result and its Checks or field details. If that denial offers **Request access**, activate it only to place a draft in the prompt box; leave the draft unsent. If the service returns no restriction, say so and continue. Do not manufacture a denial or run a write to get one. |
+| 9–10 min | Revisit the evidence | Use `/gas older` and `/gas newer` to move from discovery to the completed query. Show how a schema declaration, an earlier policy check, and the result are labeled separately. |
+
+Keep the demo on the schema and records the connected service actually returns. Do not paste record contents, links, access tokens, or snapshots into this guide or a shared recap. If a check is unavailable, let the Inspector show that it was not run; the named read and its result can still carry the demo.

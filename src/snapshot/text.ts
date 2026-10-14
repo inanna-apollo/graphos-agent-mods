@@ -10,64 +10,14 @@ const STILL = '✻'
 
 // ---- Display width
 
-/** BMP emoji drawn two cells wide with no selector (src/view/plan.ts BMP_EMOJI). */
-const BMP_EMOJI: readonly [number, number][] = [
-  [0x231a, 0x231b], [0x23e9, 0x23ec], [0x23f0, 0x23f0], [0x23f3, 0x23f3], [0x25fd, 0x25fe], [0x2614, 0x2615],
-  [0x2648, 0x2653], [0x267f, 0x267f], [0x2693, 0x2693], [0x26a1, 0x26a1], [0x26aa, 0x26ab], [0x26bd, 0x26be],
-  [0x26c4, 0x26c5], [0x26ce, 0x26ce], [0x26d4, 0x26d4], [0x26ea, 0x26ea], [0x26f2, 0x26f3], [0x26f5, 0x26f5],
-  [0x26fa, 0x26fa], [0x26fd, 0x26fd], [0x2705, 0x2705], [0x270a, 0x270b], [0x2728, 0x2728], [0x274c, 0x274c],
-  [0x274e, 0x274e], [0x2753, 0x2755], [0x2757, 0x2757], [0x2795, 0x2797], [0x27b0, 0x27b0], [0x27bf, 0x27bf],
-  [0x2b1b, 0x2b1c], [0x2b50, 0x2b50], [0x2b55, 0x2b55],
-]
-const BMP_EMOJI_CODES = new Set(BMP_EMOJI.flatMap(([from, to]) => Array.from({ length: to - from + 1 }, (_, at) => from + at)))
-
-function cellsOf(code: number): number {
-  // The emoji selector widens the narrow character before it to two cells.
-  if (code === 0xfe0f) return 1
-  if (code === 0 || code === 0x200d || (code >= 0xfe00 && code <= 0xfe0e)) return 0
-  if ((code >= 0x300 && code <= 0x36f) || (code >= 0x1ab0 && code <= 0x1aff) || (code >= 0x1dc0 && code <= 0x1dff) || (code >= 0x20d0 && code <= 0x20ff) || (code >= 0xfe20 && code <= 0xfe2f)) return 0
-  if (code < 0x20 || (code >= 0x7f && code < 0xa0)) return 0
-  const isWide =
-    (code >= 0x1100 && code <= 0x115f) ||
-    (code >= 0x2e80 && code <= 0xa4cf) ||
-    (code >= 0xac00 && code <= 0xd7a3) ||
-    (code >= 0xf900 && code <= 0xfaff) ||
-    (code >= 0xfe30 && code <= 0xfe4f) ||
-    (code >= 0xff00 && code <= 0xff60) ||
-    (code >= 0xffe0 && code <= 0xffe6) ||
-    (code >= 0x1f000 && code <= 0x1faff) ||
-    (code >= 0x20000 && code <= 0x3fffd) ||
-    BMP_EMOJI_CODES.has(code)
-  return isWide ? 2 : 1
-}
-
-/** Terminal cells `text` takes: wide CJK and emoji two, combining marks none. */
-export function displayWidth(text: string): number {
-  let cells = 0
-  for (const char of text) cells += cellsOf(char.codePointAt(0) ?? 0)
-  return cells
-}
-
-const cellsOfChar = (char: string) => cellsOf(char.codePointAt(0) ?? 0)
-
-/** The longest prefix of `text` within `width` cells. */
-function takeCells(text: string, width: number): string {
-  let used = 0
-  let out = ''
-  for (const char of text) {
-    const w = cellsOfChar(char)
-    if (used + w > width) break
-    used += w
-    out += char
-  }
-  return out
-}
+import { cellWidth as displayWidth, cellsOf as cellsOfChar, graphemes, takeCells } from '../view/text-width.ts'
+export { cellWidth as displayWidth } from '../view/text-width.ts'
 
 /** The longest suffix of `text` within `width` cells. */
 function takeEndCells(text: string, width: number): string {
   let used = 0
   let out = ''
-  for (const char of [...text].reverse()) {
+  for (const char of graphemes(text).reverse()) {
     const w = cellsOfChar(char)
     if (used + w > width) break
     used += w
@@ -152,7 +102,7 @@ export function wrapRows(text: string, width: number): string[] {
       }
       // A word longer than the line is broken across rows.
       while (displayWidth(line + t) > w) {
-        const head = takeCells(t, w - displayWidth(line)) || (line === '' ? [...t][0] ?? '' : '')
+        const head = takeCells(t, w - displayWidth(line)) || (line === '' ? graphemes(t)[0] ?? '' : '')
         if (head === '') {
           rows.push(trimEndAscii(line))
           line = ''

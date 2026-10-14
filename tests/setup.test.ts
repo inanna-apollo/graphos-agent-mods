@@ -36,8 +36,8 @@ type Setup = {
 
 /** A session with Agent Services beneath the plugin; every Agent Services call, prompt fill and log line recorded. */
 function world(on: On, setup: Setup = {}) {
-  mock.clock(on)
-  const seen = { logs: [] as string[], fills: [] as { text: string; mode?: string }[], gasCalls: [] as string[] }
+  const clock = mock.clock(on)
+  const seen = { logs: [] as string[], fills: [] as { text: string; mode?: string }[], gasCalls: [] as string[], registered: [] as string[] }
   on('ui.log', (_, e) => {
     seen.logs.push(e.text)
     return { value: undefined }
@@ -69,8 +69,8 @@ function world(on: On, setup: Setup = {}) {
   })
   on('store.get', () => ({ value: undefined }))
   on('session.start', () => ({ cwd: '/tmp' }))
-  on('command.register', (_, e) => ({ value: { command: e.name } }))
-  return seen
+  on('command.register', (_, e) => { seen.registered.push(e.name); return { value: { command: e.name } } })
+  return { ...seen, clock }
 }
 
 const start = ($: Engine) => $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
@@ -89,26 +89,38 @@ test('everything in place: ready, nothing drafted, and no Agent Services tool is
   expect(seen.gasCalls).toEqual([])
 })
 
-test('an older Claude Code is told to run claude update, in the report and once at session start', async ($, on) => {
+test('an older Claude Code gets Desktop and terminal update paths, in the report and once at session start', async ($, on) => {
   const seen = world(on, { version: '2.1.288' })
   await start($)
+  for (let step = 0; step < 100 && !seen.logs.some(line => /2\.1\.288/.test(line)); step++) await seen.clock.advance(10)
   await start($)
+  // Observe the second startup job completing before checking warning deduplication.
+  for (let step = 0; step < 100 && seen.registered.length < 2; step++) await seen.clock.advance(10)
+  expect(seen.registered).toHaveLength(2)
   const lines = seen.logs.filter(line => /2\.1\.288/.test(line))
   expect(lines).toHaveLength(1)
+  expect(lines[0]).toContain('Desktop Code')
   expect(lines[0]).toContain('claude update')
-  expect(await setup($)).toContain('claude update')
+  const report = await setup($)
+  expect(report).toContain('Desktop Code')
+  expect(report).toContain('claude update')
 })
 
 test('a current Claude Code adds no line at session start', async ($, on) => {
   const current = world(on)
   await start($)
+  for (let step = 0; step < 100 && current.registered.length === 0; step++) await current.clock.advance(10)
+  expect(current.registered).toHaveLength(1)
   expect(current.logs.filter(line => /needs Claude Code/.test(line))).toEqual([])
 })
 
 test('an engine with no version call is told to check it by hand, and the session still starts', async ($, on) => {
   const seen = world(on, { version: 'throw' })
   await start($)
+  for (let step = 0; step < 100 && seen.registered.length === 0; step++) await seen.clock.advance(10)
+  expect(seen.registered).toHaveLength(1)
   expect(seen.logs.filter(line => /needs Claude Code/.test(line))).toEqual([])
+  expect(await setup($)).toContain('/status in Desktop Code')
   expect(await setup($)).toContain('claude --version')
 })
 

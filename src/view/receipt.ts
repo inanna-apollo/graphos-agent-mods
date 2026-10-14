@@ -137,7 +137,7 @@ export function receiptOf(outcome: CallOutcome | undefined, ir?: CallIR): Receip
     ? [size, 'Claude saw only a short preview and its path']
     : [size, held(tokensText(bytes ?? 0))]
   // The heaviest field and its share, unless the flags line already says them (the dominant field is the lead).
-  if (lead !== undefined && dominant === undefined) parts.push(`${lead.short}${NBSP}${lead.share}`)
+  if (lead !== undefined && dominant === undefined) parts.push(held(`${lead.gloss ?? lead.short} ${lead.share}`))
   return {
     line: parts.join(' · '),
     size,
@@ -151,36 +151,26 @@ export function receiptOf(outcome: CallOutcome | undefined, ir?: CallIR): Receip
   }
 }
 
-/** What the receipt's hover card says, as plain strings: its title, paragraphs (the first leads, the rest are dim), and each named field's facts. */
+/** Compact response-size facts for the receipt hover. */
 export type ReceiptCard = {
   title: string
   paragraphs: string[]
-  fields: { label: string; takes: string; without: string; home: ReceiptField['home'] }[]
+  fields: { label: string; takes: string }[]
 }
 
-const rowsWords = (rows: number) => `${rows.toLocaleString('en-US')} row${rows === 1 ? '' : 's'}`
-
 export function cardOf(receipt: Receipt): ReceiptCard {
-  const bytes = receipt.bytes ?? 0
-  // A size and its unit, and a token estimate, stay together where a line breaks.
-  const read = held(`${receipt.isApproximate ? 'about ' : ''}${sizeText(bytes)}`)
-  const tokens = held(tokensText(bytes))
-  const lead = receipt.isKeptOut
-    ? `Claude Code kept this response out of Claude's context: it saved the whole response${receipt.bytes === undefined ? '' : ` (${read})`} to a file, and Claude saw only a short preview and the file's path.${
-        receipt.isApproximate ? ' The pane did not read the file, so it cannot say which fields took the room.' : ` Read in full, it would take ${tokens}.`
-      }`
-    : `Claude read this whole response: ${read}, or ${tokens}.${receipt.fields.length > 0 ? ' The fields below took most of it.' : ''}`
-  const how = `Sizes are the response's JSON written compactly, in UTF-8 bytes (1 KB is 1,024 bytes). Tokens are estimated as bytes divided by four, not counted from the model's tokenizer.${
-    receipt.isCapped ? ' The response had more fields than the pane tracks, so some detail is counted in the field above it.' : ''
-  }`
+  const tokens = held(tokensText(receipt.bytes ?? 0))
+  const paragraphs = receipt.isApproximate
+    ? ['Size reported by Claude Code; file contents not inspected.']
+    : ['Compact JSON bytes · tokens estimated as bytes ÷ 4.']
+  if (receipt.isKeptOut) paragraphs.unshift(`Only a preview and file path were returned.${receipt.isApproximate ? '' : ` Full response: ${tokens} (estimated).`}`)
+  if (receipt.isCapped) paragraphs.push('Some fields grouped under their parent.')
   return {
-    title: `context · ${receipt.isKeptOut ? receipt.size : `${receipt.size} · ${tokens}`}`,
-    paragraphs: [lead, how],
+    title: `Response size · ${receipt.isKeptOut ? receipt.size : `${receipt.size} · ${tokens}`}`,
+    paragraphs,
     fields: receipt.fields.map(one => ({
-      label: one.label,
-      takes: [held(one.size), `${one.share} of the response`, one.entry.rows === undefined ? '' : `${rowsWords(one.entry.rows)}${one.each === undefined ? '' : `, ${held(one.each)} each`}`].filter(Boolean).join(' · '),
-      without: `Without ${one.label} ${receipt.isKeptOut ? 'the saved file' : 'this result'} would be about ${held(one.without.size)} (${held(one.without.tokens)}).`,
-      home: one.home,
+      label: one.gloss ?? one.label,
+      takes: `${one.share} of response · ${held(one.size)}`,
     })),
   }
 }

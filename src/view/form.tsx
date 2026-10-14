@@ -15,7 +15,7 @@ import { noteText } from './annotations.ts'
 import type { AccessPlan, ArgPlan, ReturnsPlan, RootPlan } from './plan.ts'
 import { argHover, rootHover } from './ui/hover.tsx'
 import { Field, GLYPH, MARK, STRUCT, TONE, struct } from './ui/index.tsx'
-import { TEXT } from './ui/theme.ts'
+import { TEXT, QUIET } from './ui/theme.ts'
 
 /** The drawer for the open field, when it is one of `fields`, `width` cells wide. */
 function drawerFor(ctx: Ctx, fields: readonly (FieldIR | undefined)[], width: number): RenderNode | null {
@@ -55,7 +55,7 @@ function Arg({ ctx, root, arg, plan }: { ctx: Ctx; root: FieldIR; arg: ArgIR; pl
       {...(!plan.isStacked && { labelHover: argHover(root.path, arg.name) })}
     >
         {shown.map((line, index) => (
-          <Text wrap="wrap">
+          <Text color={TEXT} wrap="wrap">
             {line.map(segment => (
               segment.url !== undefined && Link !== undefined ? (
                 <Text {...toneOf(segment.tone ?? 'value')}>
@@ -70,11 +70,11 @@ function Arg({ ctx, root, arg, plan }: { ctx: Ctx; root: FieldIR; arg: ArgIR; pl
               )
             ))}
             {/* Schema hints after the value (`· max 100`), only where the plan found room. */}
-            {plan.hint !== undefined && index === shown.length - 1 && <Text dimColor>{plan.hint}</Text>}
+            {plan.hint !== undefined && index === shown.length - 1 && <Text color={QUIET}>{plan.hint}</Text>}
           </Text>
         ))}
-        {!canExpand && below !== undefined && <Text dimColor wrap="wrap">{below}</Text>}
-        {canExpand && Button !== undefined && below !== undefined && <Button key={`arg:${id}`} plain dimColor label={below} onPress={() => ctx.act?.({ arg: isFull ? null : id })} />}
+        {!canExpand && below !== undefined && <Text color={QUIET} wrap="wrap">{below}</Text>}
+        {canExpand && Button !== undefined && below !== undefined && <Button key={`arg:${id}`} plain label={below} onPress={() => ctx.act?.({ arg: isFull ? null : id })}><Text color={QUIET}>{below}</Text></Button>}
     </Field>
   )
   if (!plan.isStacked) return label
@@ -82,7 +82,7 @@ function Arg({ ctx, root, arg, plan }: { ctx: Ctx; root: FieldIR; arg: ArgIR; pl
   return (
     <kit.Box flexDirection="column">
       <kit.Box flexDirection="row" paddingLeft={MARK}>
-        <Text hover={argHover(root.path, arg.name)}>{(plan.labelRows ?? [plan.label]).join('\n')}</Text>
+        <Text color={TEXT} hover={argHover(root.path, arg.name)}>{(plan.labelRows ?? [plan.label]).join('\n')}</Text>
       </kit.Box>
       {label}
     </kit.Box>
@@ -115,8 +115,8 @@ function InChanges({ ctx, root, plan }: { ctx: Ctx; root: FieldIR; plan: NonNull
     <SubRow ctx={ctx} label={IN_CHANGES}>
       <Box flexDirection="row" flexWrap="wrap">
         {plan.names.flatMap((one, index) => [
-          ...(index > 0 ? [<Text dimColor>{GLYPH.separator}</Text>] : []),
-          <Text dimColor hover={argHover(root.path, one.name)}>
+          ...(index > 0 ? [<Text color={QUIET}>{GLYPH.separator}</Text>] : []),
+          <Text color={QUIET} hover={argHover(root.path, one.name)}>
             {one.label}
           </Text>,
         ])}
@@ -132,11 +132,11 @@ function Returns({ ctx, plan }: { ctx: Ctx; plan: ReturnsPlan }) {
   const { lines } = plan
   if (lines.length === 0) return null
   return (
-    <SubRow ctx={ctx} label={RETURN_LABEL}>
+    <SubRow ctx={ctx} label={ctx.profile?.returnsLabel ?? RETURN_LABEL}>
       {/* The tree always starts on the row after the label: a list's own note is the label row, else the root's type in words (or nothing). */}
       {!plan.isLeadLine &&
         (plan.isLeadUnread === true ? (
-          <ctx.kit.Text dimColor wrap="wrap">
+          <ctx.kit.Text color={QUIET} wrap="wrap">
             {plan.lead ?? ' '}
           </ctx.kit.Text>
         ) : (
@@ -162,11 +162,11 @@ function Returns({ ctx, plan }: { ctx: Ctx; plan: ReturnsPlan }) {
         drawerFor(ctx, [line.head, ...line.fields], Math.max(1, ctx.columns - ctx.column)),
       ])}
       {plan.paging !== undefined && (
-        <ctx.kit.Text dimColor wrap="wrap">
+        <ctx.kit.Text color={QUIET} wrap="wrap">
           {plan.paging}
         </ctx.kit.Text>
       )}
-      {plan.more > 0 && <ctx.kit.Text dimColor>{`${GLYPH.checking} ${plan.more} more`}</ctx.kit.Text>}
+      {plan.more > 0 && <ctx.kit.Text color={QUIET}>{`${GLYPH.checking} ${plan.more} more`}</ctx.kit.Text>}
     </SubRow>
   )
 }
@@ -188,13 +188,13 @@ function Access({ ctx, plan }: { ctx: Ctx; plan: AccessPlan }) {
   return (
     <SubRow ctx={ctx} label="access">
       {scopes.length === 0 ? (
-        <Text dimColor>{plan.empty}</Text>
+        <Text color={QUIET}>{plan.empty}</Text>
       ) : (
         // Each scope wraps, never cut; the last carries `+N` for the ones left out.
         scopes.map((scope, index) => (
-          <Text wrap="wrap">
+          <Text color={TEXT} wrap="wrap">
             {scope}
-            {index === scopes.length - 1 && plan.more > 0 && <Text dimColor>{moreText(plan.more)}</Text>}
+            {index === scopes.length - 1 && plan.more > 0 && <Text color={QUIET}>{moreText(plan.more)}</Text>}
           </Text>
         ))
       )}
@@ -214,8 +214,9 @@ function Access({ ctx, plan }: { ctx: Ctx; plan: AccessPlan }) {
 export function RootForm({ ctx, root, opType, plan }: { ctx: Ctx; root: FieldIR; opType: OpType; plan: RootPlan }) {
   const { kit } = ctx
   const { Box, Text } = kit
-  const verb = rootVerb(root, opType)
-  const pinned = ctx.pins.field(root.coordinate)
+  const verb = ctx.profile?.verb ?? rootVerb(root, opType)
+  const isDeclared = ctx.profile?.isDeclared === true
+  const pinned = ctx.pins.field(root.path)
   const alias = root.alias === undefined ? '' : `${esc(root.alias, 40)}`.replace(/\s+/g, ' ')
   // With several roots, the rule the header runs out in (the plan's cells): after a name that breaks, on its last row.
   const rule = plan.rule > 0 ? <Text {...struct(STRUCT.rootRule)}>{` ${GLYPH.rule.repeat(plan.rule)}`}</Text> : null
@@ -225,12 +226,12 @@ export function RootForm({ ctx, root, opType, plan }: { ctx: Ctx; root: FieldIR;
       {/* The root name gets the whole row after the verb: its column is never sized by argument names. */}
       <Field kit={kit} label={verb} isSection labelWidth={ctx.column} labelHover={rootHover(root.path)} labelColor={STRUCT.verb} isLabelBold>
         <Box flexDirection="row" flexWrap="wrap">
-          {pinned !== undefined && isAttentionShown(pinned, root) && <Attention ctx={ctx} pinned={pinned} />}
+          {pinned !== undefined && isAttentionShown(pinned, root, ctx.profile?.policyFacts !== false && (!ctx.isSettled || ctx.tool === 'dry_run')) && <Attention ctx={ctx} pinned={pinned} />}
           <PolicyMark ctx={ctx} field={root} />
           {/* The caller's own name for the root, as the operation spells it (`open: jira_search…`), so the reader can match it to the agent's words. */}
-          {alias !== '' && <Text>{`${alias}: `}</Text>}
+          {alias !== '' && <Text color={TEXT}>{`${alias}: `}</Text>}
           <FieldName ctx={ctx} field={root} where="root" {...(plan.nameRows !== undefined && { rows: plan.nameRows })} {...(isRuleOnName && rule !== null && { tail: rule })} />
-          {plan.hint !== undefined && <Text dimColor>{plan.hint}</Text>}
+          {plan.hint !== undefined && <Text color={QUIET}>{plan.hint}</Text>}
           {pinned !== undefined && <PinNote ctx={ctx} pinned={pinned} />}
           {!isRuleOnName && rule}
         </Box>
@@ -238,7 +239,7 @@ export function RootForm({ ctx, root, opType, plan }: { ctx: Ctx; root: FieldIR;
       {/* Only a description that fits whole on its row; the root's card has all of it. */}
       {plan.description !== undefined && (
         <Field kit={kit} label="" labelWidth={ctx.column}>
-          <Text dimColor wrap="truncate-end">{`\u201c${plan.description.text}\u201d`}</Text>
+          <Text color={QUIET} wrap="truncate-end">{`\u201c${plan.description.text}\u201d`}</Text>
         </Field>
       )}
       {drawerFor(ctx, [root], ctx.columns)}
@@ -249,15 +250,22 @@ export function RootForm({ ctx, root, opType, plan }: { ctx: Ctx; root: FieldIR;
         <Box flexDirection="column">
           {one.rows !== undefined && (
             <Box paddingLeft={MARK}>
-              <Text dimColor hover={argHover(root.path, one.name)}>
+              <Text color={QUIET} hover={argHover(root.path, one.name)}>
                 {one.rows.join('\n')}
               </Text>
             </Box>
           )}
           <Field kit={kit} label={one.rows !== undefined ? '' : one.name} mark="" labelWidth={ctx.column} {...(one.rows === undefined && { labelHover: argHover(root.path, one.name) })}>
-            <Text dimColor wrap="wrap">
-              {one.text}
-            </Text>
+            {/* A schema view says each argument's type, in the type's style; a call's defaults are dim. */}
+            {isDeclared ? (
+              <Text {...struct(STRUCT.type, true, { italic: true })} wrap="wrap">
+                {one.text}
+              </Text>
+            ) : (
+              <Text color={QUIET} wrap="wrap">
+                {one.text}
+              </Text>
+            )}
           </Field>
         </Box>
       ))}

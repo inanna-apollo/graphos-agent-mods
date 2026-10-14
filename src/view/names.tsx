@@ -10,8 +10,8 @@ import type { FieldTag } from './kit.ts'
 import { classTag } from './personal.ts'
 import { noteText } from './annotations.ts'
 import type { Pinned } from './annotations.ts'
-import { attentionMarker, continuationOf, isAttentionShown } from './plan.ts'
-import { COLOR, GLYPH, STRUCT, struct } from './ui/index.tsx'
+import { attentionMarker, continuationOf, isAttentionShown, shownPolicyMark } from './plan.ts'
+import { COLOR, DATA, GLYPH, STRUCT, TEXT, QUIET, struct } from './ui/index.tsx'
 import { foldHover, nameHover } from './ui/hover.tsx'
 
 /**
@@ -28,8 +28,10 @@ export function Attention({ ctx, pinned }: { ctx: Ctx; pinned: Pinned }) {
  * cannot carry the policy color, so the glyph is a separate element.
  */
 export function PolicyMark({ ctx, field }: { ctx: Ctx; field: FieldIR }) {
-  const mark = policyMark(field)
-  const color = policyColor(field)
+  if (ctx.profile?.policyFacts === false) return null
+  const showPolicy = !ctx.isSettled || ctx.tool === 'dry_run'
+  const mark = shownPolicyMark(field, ctx.pins.field(field.path), showPolicy)
+  const color = showPolicy ? policyColor(field) : mark === GLYPH.deny ? COLOR.deny : undefined
   if (mark === undefined || color === undefined) return null
   return <ctx.kit.Text color={color} bold>{`${mark} `}</ctx.kit.Text>
 }
@@ -38,7 +40,7 @@ export function PolicyMark({ ctx, field }: { ctx: Ctx; field: FieldIR }) {
 export function PinNote({ ctx, pinned }: { ctx: Ctx; pinned: Pinned }) {
   if (noteText(pinned) === '') return null
   return (
-    <ctx.kit.Text dimColor>
+    <ctx.kit.Text color={QUIET}>
       {noteText(pinned)}
     </ctx.kit.Text>
   )
@@ -46,7 +48,7 @@ export function PinNote({ ctx, pinned }: { ctx: Ctx; pinned: Pinned }) {
 
 /** Toggles `field`'s drawer. */
 export function openField(ctx: Ctx, path: string) {
-  ctx.act?.({ field: ctx.ui.field === path ? null : path })
+  ctx.act?.({ detail: ctx.ui.detail?.callId === ctx.callId && ctx.ui.detail?.detailId === `f:${path}` ? null : { callId: ctx.callId ?? '', detailId: `f:${path}` }, expectedCallId: ctx.callId })
 }
 
 /**
@@ -59,14 +61,15 @@ export function openField(ctx: Ctx, path: string) {
  * last of them (a root's rule).
  */
 export function FieldName({ ctx, field, where, bold, rows, tail }: { ctx: Ctx; field: FieldIR; where: string; bold?: boolean; rows?: readonly string[]; tail?: RenderNode }) {
+  const foreground = where === 'root' && ctx.profile?.verb === 'TYPE' ? DATA : TEXT
   const { Box, Text, Button } = ctx.kit
   const isButton = ctx.act !== undefined && Button !== undefined
   const label = esc(field.name, 120)
   const one = (text: string, index: number) => {
-    if (isButton) return <Button key={`${where}:${field.path}${index === 0 ? '' : `:${index}`}`} plain label={text} hover={nameHover(field.path)} onPress={() => openField(ctx, field.path)} />
+    if (isButton) return <Button key={`${where}:${field.path}${index === 0 ? '' : `:${index}`}`} plain label={text} hover={nameHover(field.path)} onPress={() => openField(ctx, field.path)}><Text color={foreground}>{text}</Text></Button>
     const policy = policyColor(field)
     return (
-      <Text {...(policy === undefined ? {} : { color: policy })} bold={bold === true || field.policy === 'deny'} hover={nameHover(field.path)}>
+      <Text color={policy ?? foreground} bold={bold === true || field.policy === 'deny'} hover={nameHover(field.path)}>
         {text}
       </Text>
     )
@@ -154,7 +157,7 @@ export function NameLine({
   // The schema's own classification, dim after the name, unless the note pinned to it says it.
   const classOf = (field: FieldIR) => (annotation !== undefined && field === node ? '' : classTag(field))
   fields.forEach((field, index) => {
-    if (index > 0) names.push(<Text dimColor>{GLYPH.separator}</Text>)
+    if (index > 0) names.push(<Text color={QUIET}>{GLYPH.separator}</Text>)
     names.push(<PolicyMark ctx={ctx} field={field} />)
     names.push(<FieldName ctx={ctx} field={field} where={where} {...(breaks?.[field.path] !== undefined && { rows: breaks[field.path] })} />)
     if (classOf(field) !== '') names.push(<Text {...struct(STRUCT.type, true)}>{classOf(field)}</Text>)
@@ -162,7 +165,7 @@ export function NameLine({
   })
   const parts = [
     lead,
-    annotation !== undefined && isAttentionShown(annotation, node) && <Attention ctx={ctx} pinned={annotation} />,
+    annotation !== undefined && isAttentionShown(annotation, node, ctx.profile?.policyFacts !== false && (!ctx.isSettled || ctx.tool === 'dry_run')) && <Attention ctx={ctx} pinned={annotation} />,
     onType !== undefined && <Text {...struct(STRUCT.type, true, { italic: true })}>{`on ${esc(onType, 120)} `}</Text>,
     head !== undefined && <PolicyMark ctx={ctx} field={head} />,
     head !== undefined && <FieldName ctx={ctx} field={head} where={`${where}h`} {...(breaks?.[head.path] !== undefined && { rows: breaks[head.path] })} />,
@@ -172,10 +175,10 @@ export function NameLine({
     head !== undefined && fields.length > 0 && <Text {...struct(STRUCT.guide)}>{' { '}</Text>,
     ...names,
     head !== undefined && fields.length > 0 && <Text {...struct(STRUCT.guide)}>{' }'}</Text>,
-    note !== undefined && <Text dimColor>{`${head !== undefined || fields.length > 0 ? '  ' : ''}${note}`}</Text>,
+    note !== undefined && <Text color={QUIET}>{`${head !== undefined || fields.length > 0 ? '  ' : ''}${note}`}</Text>,
     // A direct child of the wrapping row, so it heats the fold card's group.
     fold !== undefined && (
-      <Text dimColor {...(head !== undefined && { hover: foldHover(head.path) })}>
+      <Text color={QUIET} {...(head !== undefined && { hover: foldHover(head.path) })}>
         {`${note !== undefined ? GLYPH.separator : head !== undefined || fields.length > 0 ? '  ' : ''}${fold}`}
       </Text>
     ),

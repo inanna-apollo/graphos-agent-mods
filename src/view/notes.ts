@@ -1,11 +1,14 @@
 // One short note per detected condition, derived from the IR. The strip is
 // absent when there are no conditions to report. Pure: no $.
 
+import { policyUnits } from '../annotate.ts'
 import type { CallIR, FieldIR } from '../ir.ts'
 import { LIMIT_ARGS, PLACE_ARGS, esc, limitOf, missingInclude, returnsList, walk } from './kit.ts'
 import { classifiedOf, personalPlaces } from './personal.ts'
 import type { PersonalPlace } from './personal.ts'
 import { COLOR, GLYPH } from './ui/theme.ts'
+import { EXECUTE_PROFILE } from './profile.ts'
+import type { Profile } from './profile.ts'
 import type { SemanticColor } from './ui/theme.ts'
 
 export type Note = {
@@ -21,6 +24,8 @@ export type Note = {
   /** Dim words two cells after `text` (`denied · pii.contact`), never shed. Escaped. */
   detail?: string
   isDim?: boolean
+  /** What the note's card says, line by line, when the note itself says only part of it (a diagnostic's whole text). Escaped. */
+  card?: string[]
 }
 
 const LARGE = 100
@@ -43,24 +48,26 @@ export function hasUnsetLimit(root: FieldIR): boolean {
  * the pane already draws with their mark (a return tree, a root line): they
  * have a home there, so the strip leaves them out.
  */
-export function notesOf(ir: CallIR, isShown: (field: FieldIR) => boolean = () => false, isSettled = false, hasRunValid = false): Note[] {
+export function notesOf(ir: CallIR, isShown: (field: FieldIR) => boolean = () => false, isSettled = false, hasRunValid = false, profile: Pick<Profile, 'policyNotes' | 'limitNotes'> & { isLookup?: boolean } = EXECUTE_PROFILE): Note[] {
   const notes: Note[] = []
   const fields = walk(ir.roots)
 
   // A prediction the call itself answered (it ran, and validated) is not said again.
-  if (ir.state === 'invalid' && !hasRunValid) {
+  // A validate's own answer says so while its schema pass still runs.
+  if ((ir.state === 'invalid' || ir.validation?.valid === false) && !hasRunValid && (!isSettled || profile.isLookup === true)) {
     const diagnostics = ir.validation?.diagnostics ?? []
     for (const diagnostic of diagnostics.slice(0, MAX_DIAGNOSTICS)) {
-      const first = (diagnostic.trim().split('\n')[0] ?? '').replace(/^Error:\s*/, '')
-      notes.push({ glyph: GLYPH.failed, text: `will fail: ${esc(first, 300)}`, color: COLOR.deny })
+      const lines = diagnostic.trim().split('\n')
+      const first = (lines[0] ?? '').replace(/^Error:\s*/, '')
+      notes.push({ glyph: GLYPH.failed, text: `will fail: ${esc(first, 300)}`, color: COLOR.deny, card: lines.slice(0, 40).map(line => esc(line.trimEnd(), 300)) })
     }
     if (diagnostics.length > MAX_DIAGNOSTICS) notes.push({ glyph: GLYPH.failed, text: `and ${diagnostics.length - MAX_DIAGNOSTICS} more problems`, color: COLOR.deny })
     if (diagnostics.length === 0) notes.push({ glyph: GLYPH.failed, text: 'will fail validation', color: COLOR.deny })
   }
   // The operation-wide denial, writes and destructive names are flags (src/view/flags.ts), not notes.
-  notes.push(...fieldNotes(ir.roots, isShown))
+  notes.push(...fieldNotes(ir.roots, isShown, !isSettled || (profile.isLookup === true && profile.policyNotes)))
 
-  for (const root of ir.roots) {
+  for (const root of profile.limitNotes ? ir.roots : []) {
     const limit = limitOf(root)
     const where = ir.roots.length > 1 ? ` on ${esc(root.name, 120)}` : ''
     if (limit === undefined && returnsList(root) && hasUnsetLimit(root)) {
@@ -100,14 +107,18 @@ export function notesOf(ir: CallIR, isShown: (field: FieldIR) => boolean = () =>
     notes.push({ glyph: GLYPH.deprecated, text: 'deprecated:', names: named(deprecated) })
   }
 
-  if (ir.state === 'analyzing') {
+  if (!profile.policyNotes || (isSettled && profile.isLookup !== true)) {
+    // A call that is not about policy (a search, a validate) says nothing of it.
+  } else if (ir.state === 'analyzing') {
     // A call that already ran is past its policy: its checks may still land (a call trust rules let through runs at once), but RESULT says what came back.
     if (!isSettled) notes.push({ glyph: GLYPH.checking, text: 'checking policy…', isDim: true })
   } else {
-    const unknown = fields.filter(field => field.policy === 'unknown')
-    if (unknown.length > 0 && unknown.length === fields.length) {
-      // Our own enrichment falling short is grey, never red (mod-builder design.md). A failed check is a flag.
-      if (ir.checks?.policy !== 'failed') notes.push(uncheckedNote(ir))
+    const units = policyUnits(ir.roots)
+    const unknown = units.filter(field => field.policy === 'unknown')
+    if (unknown.length > 0 && unknown.length === units.length) {
+      // Missing inspection evidence stays neutral, including failed checks.
+      // Pending approval still needs to show that access is unknown.
+      notes.push(uncheckedNote(ir))
     } else if (unknown.length > 0) {
       notes.push({ glyph: GLYPH.unknown, text: `access unknown for ${plural(unknown.length, 'field')}:`, names: named(unknown), isDim: true })
     }
@@ -126,13 +137,13 @@ const FIELD_LINES = 3
  * lists the rest. Only fields with no other home: one `isShown` says the pane draws with its
  * mark is left out.
  */
-function fieldNotes(roots: readonly FieldIR[], isShown: (field: FieldIR) => boolean): Note[] {
+function fieldNotes(roots: readonly FieldIR[], isShown: (field: FieldIR) => boolean, showPolicy: boolean): Note[] {
   type Entry = { name: string; classes: string[]; where: string[] }
   const kinds: Record<'deny' | 'mask' | 'personal', Map<string, Entry>> = { deny: new Map(), mask: new Map(), personal: new Map() }
   const places = new Map(personalPlaces(roots).map(place => [place.field, place.where] as const))
   for (const field of walk(roots)) {
     if (field.children.length > 0 || isShown(field)) continue
-    const kind = field.policy === 'deny' ? 'deny' : field.policy === 'mask' ? 'mask' : places.has(field) ? 'personal' : undefined
+    const kind = showPolicy && field.policy === 'deny' ? 'deny' : showPolicy && field.policy === 'mask' ? 'mask' : places.has(field) ? 'personal' : undefined
     if (kind === undefined) continue
     const entry = kinds[kind].get(field.name) ?? { name: esc(field.name, 120), classes: [], where: [] }
     const classified = classifiedOf(field)
@@ -185,8 +196,10 @@ export function personalNames(places: readonly PersonalPlace[]): string {
 /** Why no field has a policy: what the policy check said, in the reader's words. */
 function uncheckedNote(ir: CallIR): Note {
   const policy = ir.checks?.policy
-  if (policy === 'skipped') return { glyph: GLYPH.unknown, text: 'access not checked', hint: 'no service in Agent Services claims it', isDim: true }
-  return { glyph: GLYPH.unknown, text: 'access not checked', hint: 'allow Agent Services dry_run to check', isDim: true }
+  const context = ir.checks?.context?.find(one => one.check === 'policy' && one.outcome !== 'ok')
+  if (context?.outcome === 'skipped' && context.reason === 'unclaimed-service') return { glyph: GLYPH.unknown, text: 'access not checked', hint: 'no service claims this operation', isDim: true }
+  if (context?.outcome === 'not-allowed' && context.decision === 'ask' && context.ceiling !== 'deny') return { glyph: GLYPH.unknown, text: 'access not checked', hint: 'the read-only access check needs permission', isDim: true }
+  return { glyph: GLYPH.unknown, text: policy === 'not-allowed' ? 'access check permission unavailable' : 'access evidence unavailable', isDim: true }
 }
 
 /** `names` joined, the first few only, then `+N` for the rest; the Note wraps what is left. */

@@ -5,6 +5,7 @@ import { annotate } from '../../src/annotate.ts'
 import { buildIR } from '../../src/build.ts'
 import { normalize } from '../../src/normalize.ts'
 import { enumsOf, hintsFrom, indexSdl } from '../../src/schema.ts'
+import { cameBack, completeArgFacts, completeFieldFacts, scopesNote, statusFacts } from '../../src/view/card-facts.ts'
 
 const GLEAN = [
   `type Query {
@@ -41,6 +42,62 @@ const SLACK = [
 
 const run = (sdl: string[], op: string) =>
   annotate(buildIR('t', normalize(op, {})), { schema: indexSdl(sdl), isIncomplete: false })
+
+test('declaration details retain required inputs and defaults without claiming an operation was submitted', () => {
+  const root = run(GLEAN, '{ glean_search { results { title } } }').roots[0]!
+  const context = { isDeclared: true, policyFacts: false, tool: 'search' as const }
+  const facts = completeFieldFacts(root, undefined, context).join('\n')
+  assert.match(facts, /query: String!.*required/)
+  assert.match(facts, /pageSize: Int!.*default 10/)
+  assert.doesNotMatch(facts, /not supplied by the call|set:|server uses|policy:/)
+  assert.match(completeArgFacts(root.omittedArgs!.find(one => one.name === 'pageSize')!, true, context).join('\n'), /default 10/)
+})
+
+test('schema validation details show submitted values, and dry_run details show access evidence separately', () => {
+  const root = run(GLEAN, '{ glean_search(query: "Apollo", pageSize: 3) { results { title } } }').roots[0]!
+  root.policy = 'allow'
+  const validation = completeFieldFacts(root, undefined, { isDeclared: false, policyFacts: false, tool: 'validate' }).join('\n')
+  assert.match(validation, /query: String! = "Apollo"/)
+  assert.match(validation, /pageSize: Int! = 3/)
+  assert.doesNotMatch(validation, /policy:/)
+  const rehearsal = completeFieldFacts(root, undefined, { isDeclared: false, policyFacts: true, tool: 'dry_run' }).join('\n')
+  assert.match(rehearsal, /dry_run: allowed/)
+  assert.doesNotMatch(rehearsal, /returned:/)
+})
+
+test('opaque scalar facts explain that payload keys do not become GraphQL selectable fields', () => {
+  const root = run(['scalar Atlas_JSON', 'type Query { atlas_payload: Atlas_JSON }'], '{ atlas_payload }').roots[0]!
+  assert.equal(root.children.length, 0)
+  const facts = completeFieldFacts(root).join('\n')
+  assert.match(facts, /GraphQL JSON scalar/)
+  assert.match(facts, /without selectable child fields/)
+  assert.match(facts, /upstream service/)
+})
+
+test('an absent schema field never establishes absence of required scopes', () => {
+  const ir = run(['type Query { item: Item }', 'type Item { id: ID }'], '{ item { id } }')
+  assert.match(scopesNote(ir) ?? '', /no scopes listed/)
+  delete ir.roots[0]!.children[0]!.schema
+  assert.equal(scopesNote(ir), undefined)
+  ir.checks = { schema: 'ok', policy: 'skipped', validation: 'skipped' }
+  assert.equal(scopesNote(ir), undefined)
+})
+
+test('interruption describes missing observation without claiming execution never happened', () => {
+  const facts = statusFacts('interrupted', undefined).join(' ')
+  assert.match(facts, /before a response/)
+  assert.match(facts, /does not establish whether/)
+  assert.doesNotMatch(facts, /ran the call and the response came back/)
+})
+
+test('legacy scalar facts do not borrow a same-named value from another root', () => {
+  const ir = run(['type Query { item: Item }', 'type Item { total: Int }'], '{ left: item { total } right: item { total } }')
+  const left = ir.roots[0]!.children[0]!
+  const outcome = { rows: [], errors: [], authLinks: [], scalars: [{ field: 'total', root: 'right', value: 42 }] }
+  assert.deepEqual(cameBack(left, outcome, ir.roots), [])
+  const ambiguous = { ...outcome, scalars: [{ field: 'total', value: 42 }] }
+  assert.deepEqual(cameBack(left, ambiguous, ir.roots), [])
+})
 
 test('type facts: nullable list of non-null items', () => {
   const def = indexSdl(CONFLUENCE).get('Confluence_SearchResult')!.get('results')!
@@ -149,9 +206,16 @@ test('hint patterns', () => {
   assert.deepEqual(hintsFrom('plain words'), [])
 })
 
-test('hints are at most 80 characters', () => {
+test('oversized hints are omitted while useful hints survive', () => {
   const long = `Requires a ${'very '.repeat(30)}bounded query.`
-  for (const hint of hintsFrom(`${long} Defaults to \`${'x'.repeat(200)}\`.`)) assert.ok(hint.length <= 80)
+  const hints = hintsFrom(`${long} Defaults to \`${'x'.repeat(200)}\`. Maximum 50. Times are in Pacific Time.`)
+  assert.deepEqual(hints, ['max 50', 'timezone Pacific Time'])
+  for (const hint of hints) assert.ok(hint.length <= 80)
+  // Exercise a recognized restriction near its parser boundary as well as
+  // overlong text that should never become a hint.
+  const bounded = hintsFrom(`Requires a ${'x'.repeat(35)} query.`)
+  assert.equal(bounded.length, 1)
+  assert.ok(bounded[0]!.length <= 80)
 })
 
 test('field hints appear on FieldSchema', () => {

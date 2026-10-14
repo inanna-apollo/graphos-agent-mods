@@ -25,7 +25,7 @@ import type { Ctx } from './kit.ts'
 import type { ChangeBlockPlan, ChangeRowPlan, Plan } from './plan.ts'
 import { BODY_INDENT, CHANGE_INDENT, SIGN_AT, cardId, lineText, restText } from './plan.ts'
 import { Described, Fact, Frame, Para, TypeFacts, idHover } from './ui/hover.tsx'
-import { COLOR, GLYPH, STRUCT } from './ui/theme.ts'
+import { COLOR, GLYPH, STRUCT, TEXT, QUIET } from './ui/theme.ts'
 
 /** A sign's hue: what the call adds in the allow hue, what it removes in the deny hue, an edit in place in the mask hue. */
 const HUE: Record<Sign, string | undefined> = { '+': COLOR.allow, '-': COLOR.deny, '±': COLOR.mask, ' ': undefined }
@@ -54,13 +54,13 @@ function Block({ ctx, plan, column, gap }: { ctx: Ctx; plan: ChangeBlockPlan; co
     <Box flexDirection="column" marginTop={gap}>
       <Box flexDirection="row">
         <Box width={plan.labelCells} flexShrink={0}>
-          <Text hover={section}>
+          <Text color={TEXT} hover={section}>
             <Text color={STRUCT.bar}>{`${GLYPH.section} `}</Text>
             <Text bold>{block.section}</Text>
           </Text>
         </Box>
         <Box flexGrow={1} flexShrink={1}>
-          <Text wrap="wrap" {...(block.target.words !== '' && { hover: idHover(cardId.target(block.path)) })}>
+          <Text color={TEXT} wrap="wrap" {...(block.target.words !== '' && { hover: idHover(cardId.target(block.path)) })}>
             {block.target.words === '' ? ' ' : block.target.words}
           </Text>
         </Box>
@@ -70,12 +70,12 @@ function Block({ ctx, plan, column, gap }: { ctx: Ctx; plan: ChangeBlockPlan; co
       ))}
       {plan.moreRows > 0 && (
         <Box paddingLeft={CHANGE_INDENT}>
-          <Text dimColor wrap="wrap" hover={section}>{`${block.more} more`}</Text>
+          <Text color={QUIET} wrap="wrap" hover={section}>{`${block.more} more`}</Text>
         </Box>
       )}
       {plan.notes.map(note => (
         <Box paddingLeft={SIGN_AT}>
-          <Text dimColor wrap="wrap" hover={section}>
+          <Text color={QUIET} wrap="wrap" hover={section}>
             {note.text}
           </Text>
         </Box>
@@ -89,7 +89,7 @@ function SignCell({ ctx, sign }: { ctx: Ctx; sign: Sign }) {
   const { Box, Text } = ctx.kit
   return (
     <Box width={SIGN_CELLS} flexShrink={0}>
-      <Text color={HUE[sign]} bold={sign !== ' '}>
+      <Text color={HUE[sign] ?? TEXT} bold={sign !== ' '}>
         {sign}
       </Text>
     </Box>
@@ -103,7 +103,7 @@ function Row({ ctx, plan, column, hover }: { ctx: Ctx; plan: ChangeRowPlan; colu
   const hue = HUE[row.sign]
   const isDim = row.isDim === true
   const value = (
-    <Text wrap="wrap" color={hue} dimColor={isDim} hover={hover}>
+    <Text wrap="wrap" color={isDim ? QUIET : (hue ?? TEXT)} hover={hover}>
       {row.text}
     </Text>
   )
@@ -112,7 +112,7 @@ function Row({ ctx, plan, column, hover }: { ctx: Ctx; plan: ChangeRowPlan; colu
       <Box flexDirection="row" paddingLeft={SIGN_AT}>
         <SignCell ctx={ctx} sign={row.sign} />
         <Box width={Math.max(1, column - CHANGE_INDENT)} flexShrink={0}>
-          <Text dimColor={isDim} hover={hover}>
+          <Text color={isDim ? QUIET : TEXT} hover={hover}>
             {row.label}
           </Text>
         </Box>
@@ -125,7 +125,7 @@ function Row({ ctx, plan, column, hover }: { ctx: Ctx; plan: ChangeRowPlan; colu
         <Box flexDirection="row" paddingLeft={SIGN_AT}>
           <SignCell ctx={ctx} sign={row.sign} />
           <Box flexGrow={1} flexShrink={1}>
-            <Text dimColor={isDim} hover={hover}>
+            <Text color={isDim ? QUIET : TEXT} hover={hover}>
               {plan.labelRows.join('\n')}
             </Text>
           </Box>
@@ -145,7 +145,7 @@ function Row({ ctx, plan, column, hover }: { ctx: Ctx; plan: ChangeRowPlan; colu
         <Box flexDirection="row" paddingLeft={SIGN_AT}>
           <SignCell ctx={ctx} sign={row.sign} />
           <Box flexGrow={1} flexShrink={1} marginLeft={BODY_INDENT - CHANGE_INDENT}>
-            <Text wrap="wrap" color={hue} bold={line.kind === 'heading'} hover={hover}>
+            <Text wrap="wrap" color={hue ?? TEXT} bold={line.kind === 'heading'} hover={hover}>
               {lineText(line)}
             </Text>
           </Box>
@@ -153,7 +153,7 @@ function Row({ ctx, plan, column, hover }: { ctx: Ctx; plan: ChangeRowPlan; colu
       ))}
       {plan.rest > 0 && (
         <Box paddingLeft={BODY_INDENT}>
-          <Text dimColor wrap="wrap" hover={hover}>
+          <Text color={QUIET} wrap="wrap" hover={hover}>
             {restText(plan.rest)}
           </Text>
         </Box>
@@ -275,12 +275,12 @@ export function ConfirmLine({ ctx, line }: { ctx: Ctx; line: { parts: ConfirmPar
     if (part.state === 'differs') {
       return value === undefined ? (
         <Text>
-          <Text dimColor>{part.label}</Text>
+          <Text color={QUIET}>{part.label}</Text>
           <Text color={COLOR.mask}>{' came back different'}</Text>
         </Text>
       ) : (
         <Text>
-          <Text dimColor>{`${part.label} came back as `}</Text>
+          <Text color={QUIET}>{`${part.label} came back as `}</Text>
           <Text bold color={COLOR.mask}>
             {value}
           </Text>
@@ -289,17 +289,17 @@ export function ConfirmLine({ ctx, line }: { ctx: Ctx; line: { parts: ConfirmPar
     }
     return (
       <Text>
-        <Text dimColor>{part.label}</Text>
+        <Text color={QUIET}>{part.label}</Text>
         {value !== undefined && <Text bold>{` ${value}`}</Text>}
         {part.state === 'same' && <Text color={COLOR.allow}>{' ✓'}</Text>}
       </Text>
     )
   }
   return (
-    <Text wrap="wrap" hover={idHover(cardId.confirm())}>
+    <Text color={TEXT} wrap="wrap" hover={idHover(cardId.confirm())}>
       {line.parts.map((part, index) => (
         <Text>
-          {index > 0 && <Text dimColor>{GLYPH.separator}</Text>}
+          {index > 0 && <Text color={QUIET}>{GLYPH.separator}</Text>}
           {words(part)}
         </Text>
       ))}

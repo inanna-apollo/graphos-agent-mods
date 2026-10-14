@@ -182,7 +182,7 @@ test('a denied field\'s reason carries one classification: the schema\'s, else t
   const ir = irOf()
   const outcome = outcomeOf(ir, response([0, 1, 2, 3].map(i => denial(i))))
   // The schema classifies email, pending or settled: that one, not Agent Services' as well.
-  assert.deepEqual(attentionOf(ir, outcome).filter(one => one.coordinate.endsWith('.email')), [{ coordinate: 'Acme_Customer_Data_Member.email', reason: 'denied · pii.contact' }])
+  assert.deepEqual(attentionOf(ir, outcome).filter(one => one.coordinate.endsWith('.email')), [{ path: `${ROOT}.email`, coordinate: 'Acme_Customer_Data_Member.email', reason: 'denied · pii.contact' }])
   assert.equal(attentionOf(ir).find(one => one.coordinate.endsWith('.email'))?.reason, 'denied · pii.contact')
   // With no classification in the schema, Agent Services' from the denial, once the call has run.
   const bare = irOf([SDL[0]!, SDL[1]!.replace('"""Personal contact data (x-data-classification: pii.contact in the source)."""', '')])
@@ -271,11 +271,12 @@ test('a field denied under two roots is a flag for each, counted against its own
   const outcome = outcomeOf(ir, { content: [{ type: 'text', text: JSON.stringify({ data: { members: people(4), admins: people(2) }, errors }) }] })
   assert.deepEqual(
     flagsText(flagsOf(ir, outcome, true)).split(' · ').filter(part => part !== 'access request can be filed'),
-    ['email denied for 4 members', 'email denied for 2 members'],
+    ['members.email denied for 4 members', 'admins.email denied for 2 members'],
   )
-  // Access is granted per field of a type, not per root: one request covers both, said once.
+  // Preserve both response locations while requesting the schema field once.
   const draft = requestDraft(flagsOf(ir, outcome, true), ir.opName) ?? ''
-  assert.equal(draft.split('`email`').length - 1, 1, draft)
+  assert.equal(draft.split('`email`').length - 1, 2, draft)
+  assert.equal(draft.split('requestedFields ["Acme_Customer_Data_Member.email"]').length - 1, 1)
   assert.match(draft, /^File an Agent Services access request for `email` on /)
   // Pending, each by its own path.
   assert.deepEqual(flagsOf(ir).map(flag => flag.text.split(' · ')[0]), ['members.email denied', 'admins.email denied'])
@@ -305,12 +306,15 @@ const INCIDENT_SDL = [
 ]
 const flagTexts = (ir: Parameters<typeof flagsOf>[0], outcome: Parameters<typeof flagsOf>[1]) => flagsOf(ir, outcome, true).map(flag => flag.text.split(' · ')[0])
 
-test('a field denied by two paths in the same rows counts those rows once', () => {
+test('same-named fields at two nested paths retain separate row counts', () => {
   const ir = callOf('query I { incidentio_incidents { reference creator { user { email } } assignee { user { email } } } }', INCIDENT_SDL, ['incidentio_incidents.creator.user.email', 'incidentio_incidents.assignee.user.email'])
   const rows = Array.from({ length: 8 }, (_, i) => ({ reference: `INC-${i}`, creator: { user: { email: null } }, assignee: { user: { email: null } } }))
   const errors = rows.flatMap((_, i) => [deniedAt(['incidentio_incidents', i, 'creator', 'user', 'email']), deniedAt(['incidentio_incidents', i, 'assignee', 'user', 'email'])])
   const outcome = outcomeOf(ir, send({ incidentio_incidents: rows }, errors))
-  assert.deepEqual(flagTexts(ir, outcome), ['email denied for 8 incidents'])
+  assert.equal(flagsOf(ir, outcome, true).length, 2)
+  assert.deepEqual(outcome.denials?.map(one => [one.path, one.rows]), [
+    ['incidentio_incidents.creator.user.email', 8], ['incidentio_incidents.assignee.user.email', 8],
+  ])
 })
 
 test('a denial never counts more rows than the list returned', () => {

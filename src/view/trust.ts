@@ -1,16 +1,14 @@
-// What the pane and the transcript say about a call and the person's trust
-// rules (src/trust.ts): that it ran without a permission dialog and under
-// which rules, or, when rules exist and none fit, the first reason it was
-// asked. Computed by the matcher, never by Haiku. Pure: no $.
+// Inspector permission evidence, distinct from a call's execution outcome.
+// Computed by the matcher, never by Haiku. Pure: no $.
 
-import type { TrustFit } from '../ir.ts'
+import type { CallStatus, TrustFit } from '../../types/index.d.ts'
 import { esc } from './kit.ts'
 
 /** Where the rules live, as the card names it. */
 export const TRUST_FILE = '~/.claude/graphos-agent-mods/trust.graphql'
 
 export type TrustLine = {
-  /** `allow`: ran without a dialog; `asked`: rules exist and none fit. */
+  /** The Inspector's permission decision, independent of execution. */
   tone: 'allow' | 'asked'
   /** Escaped: the line under the flags. */
   text: string
@@ -25,17 +23,31 @@ export function rulesOf(fit: TrustFit): string[] {
 const ruleWords = (rules: readonly string[]) => `trust rule${rules.length === 1 ? '' : 's'} ${rules.join(', ')}`
 
 /**
- * `ran without asking · trust rule JiraTriage`, or, when none fit, the short
- * `asked · no trust rule fits`: the pane's room is for the call, so why it
- * asked is its card's to say in full (TrustCard).
+ * Only a completed call can say it ran. A match on a pending, stopped or
+ * failed call records the permission decision without inventing execution.
  */
-export function trustLineOf(fit: TrustFit | undefined): TrustLine | undefined {
+export function trustLineOf(fit: TrustFit | undefined, status: CallStatus = 'pending'): TrustLine | undefined {
   if (fit === undefined) return undefined
-  if (fit.isAllowed) return { tone: 'allow', text: esc(`ran without asking · ${ruleWords(rulesOf(fit))}`, 2_000), fit }
-  return { tone: 'asked', text: 'asked · no trust rule fits', fit }
+  if (fit.isAllowed) return { tone: 'allow', text: esc(`${status === 'ran' ? 'ran without asking' : 'permitted'} · ${ruleWords(rulesOf(fit))}`, 2_000), fit }
+  return { tone: 'asked', text: 'no Inspector trust rule fits', fit }
 }
 
 /** The transcript's word for a call that ran under trust rules; nothing for one that was asked (the dialog said so). */
-export function trustVerdictOf(fit: TrustFit | undefined): string | undefined {
-  return fit?.isAllowed === true ? esc(`✓ ran without asking · ${ruleWords(rulesOf(fit))}`, 2_000) : undefined
+export function trustVerdictOf(fit: TrustFit | undefined, status: CallStatus = 'pending'): string | undefined {
+  const line = trustLineOf(fit, status)
+  return fit?.isAllowed === true && line !== undefined ? `${status === 'ran' ? '✓ ' : ''}${line.text}` : undefined
+}
+
+/** Permission evidence and matching reasons, without claiming the tool completed. */
+export function trustFacts(fit: TrustFit | undefined, status: CallStatus = 'pending'): string[] {
+  if (fit === undefined) return []
+  return [
+    ...(fit.isAllowed ? [
+      status === 'ran' ? 'The call ran under an Inspector trust rule without an additional permission prompt.' : 'Inspector trust rules permitted this call without an additional permission prompt. This is a permission decision, not an execution result.',
+      ...fit.fits.flatMap(one => [`${esc(one.root, Infinity)}: ${esc(one.rule, Infinity)}`, ...one.reasons.map(reason => esc(reason, Infinity))]),
+    ] : ['No Inspector trust rule matched this call.', esc(fit.reason, Infinity)]),
+    'Inspector rules can allow a call that would otherwise ask. They cannot override a denial or an organization restriction; Claude Code’s own permission settings still apply.',
+    ...(status === 'interrupted' ? ['The Inspector stopped waiting; whether execution completed is unknown.'] : []),
+    `Rules: ${TRUST_FILE}; /gas trust reloads them.`,
+  ]
 }

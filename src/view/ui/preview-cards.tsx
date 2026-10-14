@@ -24,15 +24,15 @@ import type { CallIR, CallOutcome } from '../../ir.ts'
 import { placeOf as fieldPlace, rowsFacts, scalarOf } from '../card-facts.ts'
 import { pagingRole } from '../paging.ts'
 import { cardOf, receiptOf } from '../receipt.ts'
-import { Described, Fact, Frame, Para, TypeFacts, hoverScope } from './hover.tsx'
-import { COLOR, GLYPH, PANEL } from './theme.ts'
+import { Described, Fact, Frame, Para, TypeFacts, cardWidth, hoverScope, pretty } from './hover.tsx'
+import { COLOR, GLYPH, PANEL, TEXT, QUIET, SELECTED } from './theme.ts'
 
 /** The hover group of a preview row (its card and its tip), by its list (listKey) and place in it. */
 export const previewScope = (list: string, index: number) => hoverScope(cardId.row(list, index))
 
-/** What a preview row carries to light its card: inverse, at full strength. */
+/** What a preview row carries to light its card: white on teal. */
 export function previewHover(list: string, index: number): TextHoverProps {
-  return { scope: previewScope(list, index), inverse: true, dimColor: false }
+  return { scope: previewScope(list, index), color: TEXT, backgroundColor: SELECTED }
 }
 
 /**
@@ -84,11 +84,13 @@ export function RowTip({ ctx, scope, url, left, top = 0, rows }: { ctx: Ctx; sco
   return (
     <Box key={`tip:${scope}`} position="absolute" top={top} bottom={0} left={left} right={0} display="none" hover={{ scope, display: 'flex' }} backgroundColor={PANEL} flexDirection="column">
       {Markdown !== undefined && act !== undefined ? (
-        <Markdown key={`open:tip:${scope}`} text={markdownLink(`${GLYPH.link} ${scheme}${rest}`, url)} onLinkPress={() => act({ openUrl: url })} pressableLinks={[url]} />
+        <Box backgroundColor="userMessageBackground">
+          <Markdown key={`open:tip:${scope}`} text={markdownLink(`${GLYPH.link} ${scheme}${rest}`, url)} onLinkPress={() => act({ openUrl: url })} pressableLinks={[url]} />
+        </Box>
       ) : (
         colored.map((parts, index) => (
-          <Text wrap={index === kept - 1 && all.length > kept ? 'truncate-end' : 'wrap'}>
-            {parts.map(part => (part.dim === true ? <Text dimColor>{part.text}</Text> : <Text color={part.color}>{part.text}</Text>))}
+          <Text color={TEXT} wrap={index === kept - 1 && all.length > kept ? 'truncate-end' : 'wrap'}>
+            {parts.map(part => (part.dim === true ? <Text color={QUIET}>{part.text}</Text> : <Text color={part.color}>{part.text}</Text>))}
           </Text>
         ))
       )}
@@ -138,31 +140,23 @@ export function toggleCards(ctx: Ctx, plan: Plan['result']): RenderNode[] {
  * for. Computed from the call and the outcome (src/view/card-facts.ts).
  */
 export function resultCards(ctx: Ctx, plan: Plan['result'], ir: CallIR, outcome: CallOutcome | undefined): RenderNode[] {
-  const { Box, Text } = ctx.kit
   return plan.lines.flatMap((line, index) => {
-    // The context line's card: what the response cost, and each heavy field's size, share, per-row cost, schema description and what the result would be without it.
+    // A compact receipt: size, estimate method and the largest byte contributors.
     if (line.kind === 'weight') {
       const receipt = receiptOf(outcome, ir)
       if (receipt === undefined) return []
       const card = cardOf(receipt)
+      const contributors = card.fields.map(one => `${one.label} · ${one.takes}`)
+      const width = cardWidth(ctx)
+      const contentRows = cellRows(card.title, width).length + [...card.paragraphs, ...contributors]
+        .reduce((rows, text) => rows + text.split('\n').reduce((sum, line) => sum + pretty(line, width).length, 0), 0)
       return [
-        <Frame ctx={ctx} id={cardId.weight()} title={card.title}>
-          {card.paragraphs.map((text, at) => (
-            <Para ctx={ctx} text={text} dim={at > 0} />
+        <Frame ctx={ctx} id={cardId.weight()} title={card.title} contentRows={contentRows}>
+          {card.paragraphs.map(text => (
+            <Para ctx={ctx} text={text} dim />
           ))}
-          {card.fields.map(one => (
-            <Box flexDirection="column" marginTop={1}>
-              <Text bold wrap="wrap">
-                {one.label}
-              </Text>
-              <Fact ctx={ctx} label="takes" text={one.takes} />
-              <Para ctx={ctx} text={one.without} />
-              {one.home.kind === 'selected' ? (
-                <Described ctx={ctx} text={one.home.field.schema?.description?.trim()} isRead={one.home.field.schema !== undefined} max={Infinity} />
-              ) : (
-                <Para ctx={ctx} dim text={one.home.kind === 'json' ? 'inside untyped JSON: the schema does not describe it' : 'part of the GraphQL response beside the data, not a field the call selected'} />
-              )}
-            </Box>
+          {contributors.map(text => (
+            <Para ctx={ctx} text={text} />
           ))}
         </Frame>,
       ]

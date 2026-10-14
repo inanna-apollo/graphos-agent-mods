@@ -4,17 +4,23 @@
 // oldest pending call: the one the dialog is about. When nothing is pending
 // it shows the last call that settled, marked as such, so it never goes blank.
 
-import type { CallStatus, InspectedCall, InspectorCalls } from '../types'
+import type { CallStatus, InspectedCall, InspectorCalls, ResolvedCall, ResolvedInspectorCalls, SelectedCall } from '../types'
 import { isRecord } from './guards.ts'
-import { compactOutcome, truncationOf } from './result.ts'
+import { truncationOf } from './result.ts'
 
 export const EMPTY: InspectorCalls = { queue: [], last: null, history: [] }
 
-/** A call the pane can draw: an id and an IR with a `roots` list (older builds stored other shapes). */
+const LOOKUPS: readonly unknown[] = ['search', 'introspect', 'validate', 'dry_run']
+
+/** A call the pane can draw: an id, an IR with a `roots` list (older builds stored other shapes), and no tool but `execute` (absent) or a lookup. */
 const isCall = (value: unknown): value is InspectedCall => {
   if (!isRecord(value) || typeof value.id !== 'string' || !isRecord(value.ir)) return false
+  if (value.tool !== undefined && !LOOKUPS.includes(value.tool)) return false
   return Array.isArray(value.ir.roots)
 }
+
+/** An `execute` call, not a lookup. */
+export const isExecute = (call: InspectedCall): boolean => call.tool === undefined
 
 /**
  * $.state outlives the code that wrote it (a hot reload keeps it), so state
@@ -36,44 +42,13 @@ export function normalizeCalls(raw: unknown): InspectorCalls {
   return { queue, last: history[0] ?? last, history }
 }
 
-export const HISTORY_MAX = 20
-/** The newest this many history entries keep their heavy fields. */
-export const HISTORY_FULL = 5
+export const HISTORY_MAX = 128
+/** Shared with execute history so discovery remains useful throughout a demo. */
+export const LOOKUP_MAX = HISTORY_MAX
 
-/**
- * A history entry without the heavy parts of its IR (the printed operation,
- * schema prose, denial tokens). A denied field keeps that it had a token,
- * which the pane says, as an empty one: nothing reads a token's text, and
- * one runs to 16 KB.
- */
-function compact(call: InspectedCall): InspectedCall {
-  const { printed: _printed, ...ir } = call.ir
-  const slim = (field: InspectedCall['ir']['roots'][number]): InspectedCall['ir']['roots'][number] => {
-    const { schema, denialContext, ...rest } = field
-    const token = denialContext === undefined ? {} : { denialContext: '' }
-    if (schema === undefined) return { ...rest, ...token, children: field.children.map(slim) }
-    const { description: _description, ...light } = schema
-    return { ...rest, ...token, schema: light, children: field.children.map(slim) }
-  }
-  return { ...call, ir: { ...ir, roots: ir.roots.map(slim) } }
-}
-
-/**
- * The newest this many history entries keep each list's 25 rows, which the
- * `… N more` press opens out to; older ones keep the rows shown before a
- * press (src/result.ts compactOutcome), so the history written on every
- * update stays small.
- */
-export const PREVIEW_FULL = 1
-
-/** A history entry's outcome as its place keeps it. */
-const outcomeAt = (call: InspectedCall, at: number): InspectedCall => (at < PREVIEW_FULL || call.outcome === undefined ? call : { ...call, outcome: compactOutcome(call.outcome) })
-
+/** Models stay whole in session memory; only host metadata is compacted. */
 function kept(history: InspectedCall[]): InspectedCall[] {
-  return history.slice(0, HISTORY_MAX).map((call, at) => {
-    const held = outcomeAt(call, at)
-    return at < HISTORY_FULL ? held : compact(held)
-  })
+  return history.slice(0, HISTORY_MAX)
 }
 
 export function arrive(state: InspectorCalls, call: InspectedCall): InspectorCalls {
@@ -115,10 +90,17 @@ export function settleOrphans(state: InspectorCalls, owner?: string): InspectorC
 
 export type Shown = { call: InspectedCall | null; waiting: number }
 
-/** The call the pane draws, and how many calls are pending in all. */
+/**
+ * The call the pane draws, and how many like it are pending: the oldest
+ * execute waiting at its prompt, else the oldest lookup waiting, else the
+ * last call that settled. An execute's dialog holds the pane however many
+ * searches run beside it, and `1 of N` counts dialogs of the shown kind.
+ */
 export function shown(state: InspectorCalls): Shown {
   state = normalizeCalls(state)
-  return { call: state.queue[0] ?? state.last, waiting: state.queue.length }
+  const executes = state.queue.filter(isExecute)
+  const pending = executes.length > 0 ? executes : state.queue
+  return { call: pending[0] ?? state.last, waiting: pending.length }
 }
 
 /** Where the pane's cursor stands: null follows live, N shows `history[N]`. */
@@ -128,7 +110,7 @@ export type Cursor = number | null
 export function shownAt(state: InspectorCalls, cursor: Cursor): Shown {
   state = normalizeCalls(state)
   const call = cursor === null ? undefined : state.history[Math.min(Math.max(cursor, 0), state.history.length - 1)]
-  return call === undefined ? shown(state) : { call, waiting: state.queue.length }
+  return call === undefined ? shown(state) : { call, waiting: shown(state).waiting }
 }
 
 /** One step back in time, clamped at the oldest. From live, the first step skips the call live already shows. */
@@ -202,6 +184,7 @@ export function statusOf(result: { deny?: unknown; isError?: unknown; result?: u
  */
 export function isFinal(call: InspectedCall): boolean {
   if (call.status === 'pending' || call.status === 'interrupted' || call.ir.state === 'analyzing') return false
+  if (!isExecute(call)) return call.status !== 'ran' || call.found !== undefined
   return call.status !== 'ran' || call.outcome !== undefined
 }
 
@@ -221,12 +204,20 @@ export function patchTrust(state: InspectorCalls, id: string, trust: NonNullable
   return { queue, last, history: state.history.map(one => (one.id === id ? { ...one, trust } : one)) }
 }
 
-/** Records what a settled call returned; an outcome that lands on an older history entry (a call that settled before the one after it answered) is kept as that place keeps it. */
+/** Records a bounded result preview wherever the call is; older calls preserve the same facts. */
 export function patchOutcome(state: InspectorCalls, id: string, outcome: NonNullable<InspectedCall['outcome']>): InspectorCalls {
   state = normalizeCalls(state)
   const queue = state.queue.map(one => (one.id === id ? { ...one, outcome } : one))
   const last = state.last?.id === id ? { ...state.last, outcome } : state.last
-  return { queue, last, history: state.history.map((one, at) => (one.id === id ? outcomeAt({ ...one, outcome }, at) : one)) }
+  return { queue, last, history: state.history.map(one => (one.id === id ? { ...one, outcome } : one)) }
+}
+
+/** Records what a settled lookup's response said, and the IR read from it, wherever the call is. */
+export function patchLookup(state: InspectorCalls, id: string, found: NonNullable<InspectedCall['found']>, ir: InspectedCall['ir']): InspectorCalls {
+  state = normalizeCalls(state)
+  const change = (one: InspectedCall): InspectedCall => (one.id === id ? { ...one, found, ir } : one)
+  const last = state.last === null ? null : change(state.last)
+  return { queue: state.queue.map(change), last, history: state.history.map(change) }
 }
 
 /** Records which subagent made a call, wherever the call is. */
@@ -235,4 +226,37 @@ export function patchAgent(state: InspectorCalls, id: string, agent: NonNullable
   const queue = state.queue.map(one => (one.id === id ? { ...one, agent } : one))
   const last = state.last?.id === id ? { ...state.last, agent } : state.last
   return { queue, last, history: state.history.map(one => (one.id === id ? { ...one, agent } : one)) }
+}
+
+
+/** Resolved UI state includes explicit unavailable metadata, never a substitute IR. */
+export type ResolvedShown = { call: ResolvedCall | null; waiting: number }
+export function shownResolvedAt(state: ResolvedInspectorCalls, selection: SelectedCall): ResolvedShown {
+  const executes = state.queue.filter(call => call.tool === undefined)
+  const pending = executes.length > 0 ? executes : state.queue
+  const live = pending[0] ?? state.last
+  const call = selection.kind === 'live' ? live : [...state.queue, ...state.history].find(call => call.id === selection.id) ?? null
+  return { call, waiting: pending.length }
+}
+export function selectionOlder(selection: SelectedCall, state: ResolvedInspectorCalls): SelectedCall {
+  if (state.history.length === 0) return { kind: 'live' }
+  const index = selection.kind === 'live' ? (state.queue.length > 0 ? -1 : 0) : state.history.findIndex(call => call.id === selection.id)
+  return { kind: 'call', id: state.history[Math.min(index + 1, state.history.length - 1)]!.id }
+}
+export function selectionNewer(selection: SelectedCall, state: ResolvedInspectorCalls): SelectedCall {
+  if (selection.kind === 'live') return selection
+  const index = state.history.findIndex(call => call.id === selection.id)
+  if (index <= 0 || (index === 1 && state.queue.length === 0)) return { kind: 'live' }
+  return { kind: 'call', id: state.history[index - 1]!.id }
+}
+export type ResolvedNav = Omit<Nav, 'older' | 'newer'> & { older?: SelectedCall; newer?: SelectedCall }
+export function navResolvedOf(state: ResolvedInspectorCalls, selection: SelectedCall): ResolvedNav | undefined {
+  const count = state.history.length
+  if (count <= 1) return undefined
+  const index = selection.kind === 'live' ? (state.queue.length > 0 ? -1 : 0) : state.history.findIndex(call => call.id === selection.id)
+  const isLive = selection.kind === 'live'
+  return { count, position: index < 0 ? 0 : count - index, isLive,
+    ...(index < count - 1 && { older: selectionOlder(selection, state) }),
+    ...(!isLive && { newer: selectionNewer(selection, state) }),
+  }
 }

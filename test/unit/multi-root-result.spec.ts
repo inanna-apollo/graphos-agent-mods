@@ -202,11 +202,12 @@ test('an over-limit flag is about the rows the limit governs, not a facet list b
   assert.match(flagsOf(ir, over, true).find(flag => /returned/.test(flag.text))?.text ?? '', /returned 7 \(asked 3\)/)
 })
 
-test('the return tree says what the call asks for, on the one list it governs', () => {
+test('the return tree describes both list shapes without repeating the requested limit', () => {
   const ir = searchIr('query L { jira_search(jql: "x", maxResults: 3) { facets { name } issues { key } } }')
   const notes = returnLines(ir.roots[0]!).flatMap(line => (line.head === undefined || line.note === undefined ? [] : [[line.head.name, line.note]]))
   assert.deepEqual(notes.map(([name]) => name), ['facets', 'issues'])
-  assert.match(notes[1]?.[1] ?? '', /^asks for 3 /)
+  assert.match(notes[1]?.[1] ?? '', /^list of /)
+  assert.doesNotMatch(notes[1]?.[1] ?? '', /\d/)
   assert.doesNotMatch(notes[0]?.[1] ?? '', /\d/)
 })
 

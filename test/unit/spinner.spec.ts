@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
+import { COLOR as SHIMMER } from '../../src/view/live/frames.ts'
+import { QUIET, TEXT } from '../../src/view/ui/theme.ts'
 import { spinnerTextOf } from '../../src/view/spinner.ts'
 import { reviewCall } from '../../tests/review-fixtures.ts'
 
@@ -32,4 +34,9 @@ test('a headline or an operation name is escaped and bounded, never drawn as it 
   assert.doesNotMatch(named, /[\x00-\x08\x0b-\x1f\x7f-\x9f]/)
   assert.ok(spinnerTextOf(withSummary('x'.repeat(50_000))).length <= 401)
   assert.ok(spinnerTextOf({ ...withSummary(undefined), opName: 'N'.repeat(50_000) }).length <= 230)
+})
+
+test('the live shimmer uses readable neutral text without borrowing a status color', () => {
+  assert.deepEqual(SHIMMER, { base: QUIET, lit: TEXT })
+  assert.notEqual(SHIMMER.base, SHIMMER.lit)
 })

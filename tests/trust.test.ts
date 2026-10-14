@@ -104,7 +104,7 @@ test('a call outside the rules is left to ask, and the pane says what fell outsi
   await until(clock, () => false, 500)
   const view = await pane($)
   // A short line in the pane; why it asked is the line's card's to say.
-  expect(await view.find({ text: /asked · no trust rule fits/ })).toBeDefined()
+  expect(await view.find({ text: /no Inspector trust rule fits/ })).toBeDefined()
   expect(await view.find({ text: /body is outside DocsLookup/ })).toBeDefined()
 })
 

@@ -4,6 +4,7 @@
 
 import type { On } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
+import type { StoredInspectorCalls } from '../types'
 
 const SERVER = 'claude_ai_GraphOS_Agent_Services'
 const EXECUTE = `mcp__${SERVER}__execute`
@@ -28,17 +29,24 @@ const PANE_PROPS = {
 function heldExecute(on: On) {
   let release!: () => void
   let reached!: () => void
+  let observed!: () => void
   const isReleased = new Promise<void>(resolve => (release = resolve))
   const isReached = new Promise<void>(resolve => (reached = resolve))
+  const isObserved = new Promise<void>(resolve => (observed = resolve))
   const clock = mock.clock(on, { now: Date.UTC(2026, 9, 5) })
   on('tool.list', () => ({ value: GAS_TOOLS }))
   on('tool.check', () => ({ decision: 'ask' as const }))
+  on('state.set', { key: 'calls' }, async (_, e, next) => {
+    const result = await next(e)
+    if (result.value?.isSet && (e.value as StoredInspectorCalls).queue.some(call => call.status === 'pending')) observed()
+    return result
+  })
   on('tool.call', { tool: EXECUTE }, async () => {
     reached()
     await isReleased
     return { result: { content: [], isError: false } }
   })
-  return { release, isReached, clock }
+  return { release, isReached, isObserved, clock }
 }
 
 for (const surface of ['terminal', 'desktop'] as const) {
@@ -46,6 +54,8 @@ for (const surface of ['terminal', 'desktop'] as const) {
     const gas = heldExecute(on)
     const running = $.tool.call({ tool: EXECUTE, operation: OPERATION, variables: VARIABLES })
     await gas.isReached
+    await gas.clock.advance(1)
+    await gas.isObserved
 
     const pane = await $.ui.mount({ plugin: 'graphos-agent-mods', surface, component: 'Pane', requestId: 'gas', props: PANE_PROPS })
     expect(await pane.find({ type: 'Client', key: 'shimmer' })).toBeDefined()
@@ -78,6 +88,8 @@ for (const surface of ['vscode', 'mobile'] as const) {
     const gas = heldExecute(on)
     const running = $.tool.call({ tool: EXECUTE, operation: OPERATION, variables: VARIABLES })
     await gas.isReached
+    await gas.clock.advance(1)
+    await gas.isObserved
 
     const pane = await $.ui.mount({ plugin: 'graphos-agent-mods', surface, component: 'Pane', requestId: 'gas', props: PANE_PROPS })
     expect(await pane.find({ text: /checking policy/ })).toBeDefined()

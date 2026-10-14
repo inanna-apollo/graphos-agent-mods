@@ -16,7 +16,8 @@ import { indexSdl } from '../src/schema.ts'
 import { renderText, stubKit } from '../src/snapshot/text.ts'
 import { CLOSED, planFor, viewOf } from '../src/view.tsx'
 import { cardId } from '../src/view/plan.ts'
-import { hoverScope } from '../src/view/ui/hover.tsx'
+import { hoverScope, pretty } from '../src/view/ui/hover.tsx'
+import { SELECTED, TEXT } from '../src/view/ui/theme.ts'
 import { gnarlyCall, heavyCall, keptOutCall, persistedCall, reviewCall, titlesCall } from './review-fixtures.ts'
 import { LINKS, SITE } from '../test/unit/link-fixture.ts'
 
@@ -134,8 +135,34 @@ const mountFor = (surface: 'terminal' | 'desktop') => async ($: Body[0], on: Bod
   return $.ui.mount({ plugin: 'graphos-agent-mods', surface, component: 'Pane', requestId: 'hover-test', props: PANE_PROPS })
 }
 
+function inlineDetail(one: InspectedCall, detailId: string): string {
+  return renderText(viewOf(stubKit(), { call: { ...one, status: 'ran' }, waiting: 0 }, 84, { ...CLOSED, detail: { callId: one.id, detailId } }, () => undefined), 84)
+}
+
 for (const surface of ['terminal', 'desktop'] as const) {
   const mount = mountFor(surface)
+
+  test(`a short receipt fits its frame and grows when its text wraps (${surface})`, async ($, on) => {
+    on('ui.render', { component: 'Pane', requestId: 'receipt-fit' }, async ($, e) => {
+      const { Box, Text, Code, Button } = $.ui.resolve(e)
+      return viewOf({ Box, Text, Code, Button }, { call: heavyCall(), waiting: 0 }, e.props.bodyColumns, CLOSED, () => undefined, { surface: e.surface, links: LINKS, bodyRows: e.props.scroll.bodyRows })
+    })
+    const wide = await $.ui.mount({ plugin: 'graphos-agent-mods', surface, component: 'Pane', requestId: 'receipt-fit', props: { ...PANE_PROPS, bodyColumns: 84 } })
+    const wideCard = cardFor(await wide.drawn(), /Response size/).card
+    expect(wideCard).toBeDefined()
+    // Title, measurement note, contributor, and two border rows. No blank footer.
+    expect(propsOf(wideCard).height).toBe(5)
+    expect(textOf(wideCard)).toContain('issues.fields.description')
+    await wide.unmount()
+    const narrow = await $.ui.mount({ plugin: 'graphos-agent-mods', surface, component: 'Pane', requestId: 'receipt-fit', props: { ...PANE_PROPS, bodyColumns: 50 } })
+    const narrowCard = cardFor(await narrow.drawn(), /Response size/).card
+    expect(narrowCard).toBeDefined()
+    expect(propsOf(narrowCard).height).toBeGreaterThan(5)
+    expect(propsOf(narrowCard).height).toBeLessThanOrEqual(10)
+    expect(textOf(narrowCard)).toContain('issues.fields.description')
+    expect(propsOf(narrowCard).display).toBe('none')
+    expect(hoverOf(narrowCard as RenderElement)?.display).toBe('flex')
+  })
 
   test(`while pending, a field name carries a hidden hover card with its details (${surface})`, async ($, on) => {
     const pane = await mount($, on, call('pending'))
@@ -144,14 +171,14 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(card).toBeDefined()
     if (card === undefined) return
     expect(textOf(card)).toMatch(/A short excerpt/)
-    expect(textOf(card)).toMatch(/ MASKED /)
+    expect(textOf(card)).toMatch(/dry_run.*mask/i)
     // Hidden until hovered: drawn `display: none`, revealed by its group.
     expect(propsOf(card).display).toBe('none')
     expect(hoverOf(card)?.display).toBe('flex')
     // The name itself lights the group: a Text, no press involved.
     expect(trigger?.type).toBe('Text')
     expect(textOf(trigger)).toBe('excerpt')
-    expect(hoverOf(trigger as RenderElement)).toMatchObject({ scope, inverse: true })
+    expect(hoverOf(trigger as RenderElement)).toMatchObject({ scope, color: TEXT, backgroundColor: SELECTED })
   })
 
   test(`the card's description is escaped (${surface})`, async ($, on) => {
@@ -167,8 +194,8 @@ for (const surface of ['terminal', 'desktop'] as const) {
   test(`cards say denied, deprecated, and the root's scopes and type (${surface})`, async ($, on) => {
     const pane = await mount($, on, call('pending'))
     const tree = await pane.drawn()
-    expect(textOf(cardFor(tree, /\.secret · String/).card)).toMatch(/ DENIED /)
-    expect(textOf(cardFor(tree, /\.url · String/).card)).toMatch(/deprecated\s+Use links\.webui/)
+    expect(textOf(cardFor(tree, /\.secret · String/).card)).toMatch(/dry_run.*denial/i)
+    expect(textOf(cardFor(tree, /\.url · String/).card)).toMatch(/deprecated:?\s+Use links\.webui/)
     const root = cardFor(tree, /confluence_search · Confluence_SearchResults/)
     expect(textOf(root.card)).toMatch(/search:confluence/)
     expect(textOf(root.trigger)).toBe('confluence_search')
@@ -182,7 +209,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(card).toBeDefined()
     expect(propsOf(card as RenderElement).display).toBe('none')
     expect(trigger?.type).toBe('Button')
-    expect(hoverOf(trigger as RenderElement)).toMatchObject({ scope, inverse: true })
+    expect(hoverOf(trigger as RenderElement)).toMatchObject({ scope, color: TEXT, backgroundColor: SELECTED })
   })
 
   test(`a record row lights a tip with the URL it opens, on its own panel; a row with no link has none (${surface})`, async ($, on) => {
@@ -239,25 +266,31 @@ for (const surface of ['terminal', 'desktop'] as const) {
     }
   })
 
-  test(`nothing masked or denied: no meter, and a quiet \`✓ all N allowed\` lights the policy card (${surface})`, async ($, on) => {
-    // A call the response denied nothing of: with the denials Agent Services sent, "all" would overclaim (below).
-    const { outcome, ...base } = reviewCall('ran')
+  test(`settled preflight allowance remains accessible in Checks without an execution verdict (${surface})`, async ($, on) => {
+    const base = call('ran')
     const allow = (fields: typeof base.ir.roots): typeof base.ir.roots => fields.map(field => ({ ...field, policy: 'allow' as const, children: allow(field.children) }))
-    const pane = await mount($, on, { ...base, ir: { ...base.ir, roots: allow(base.ir.roots) } })
-    const tree = await pane.drawn()
-    expect(await pane.find({ text: /[▰▱]/ })).toBeUndefined()
-    const { card, trigger } = cardFor(tree, /^policy · \d+ fields/)
-    expect(textOf(trigger)).toMatch(/^✓ all \d+ allowed$/)
-    expect(textOf(card)).toContain('no scopes required by the schema')
+    const one = { ...base, ir: { ...base.ir, roots: allow(base.ir.roots) }, outcome: { rows: [], errors: [], authLinks: [], hasData: true } }
+    const pane = await mount($, on, one)
+    const { card, trigger } = cardFor(await pane.drawn(), /Inspection checks/i)
+    expect(card).toBeDefined()
+    expect(textOf(trigger)).toMatch(/Checks/)
+    expect(inlineDetail(one, 'checks')).toMatch(/separate from permission to execute/)
+    const main = renderText(viewOf(stubKit(), { call: one, waiting: 0 }, 64, CLOSED, () => undefined), 64)
+    expect(main).not.toMatch(/all \d+ selected fields allowed|[▰▱]/)
   })
 
-  test(`policy allowed every field but the response denied one: the row counts them and does not say all (${surface})`, async ($, on) => {
+  test(`a response denial stays visible when preflight allowed the same field (${surface})`, async ($, on) => {
     const base = reviewCall('ran')
     const allow = (fields: typeof base.ir.roots): typeof base.ir.roots => fields.map(field => ({ ...field, policy: 'allow' as const, children: allow(field.children) }))
-    const pane = await mount($, on, { ...base, ir: { ...base.ir, roots: allow(base.ir.roots) } })
-    const { trigger } = cardFor(await pane.drawn(), /^policy · \d+ fields/)
-    expect(textOf(trigger)).toMatch(/^\d+ allowed$/)
-    expect(textOf(trigger)).not.toMatch(/\ball\b|✓/)
+    const one = { ...base, ir: { ...base.ir, roots: allow(base.ir.roots) } }
+    const pane = await mount($, on, one)
+    expect(cardFor(await pane.drawn(), /Inspection checks/i).card).toBeDefined()
+    const main = renderText(viewOf(stubKit(), { call: one, waiting: 0 }, 64, CLOSED, () => undefined), 64)
+    expect(main).toMatch(/email denied/)
+    expect(main).not.toMatch(/all \d+ selected fields allowed/)
+    const field = inlineDetail(one, 'f:members.email')
+    expect(field).toMatch(/execution response: denied/)
+    expect(field).toMatch(/dry_run: allowed/)
   })
 
   test(`a record row with nothing after its key gets its tip after the key, on the key's last row (${surface})`, async ($, on) => {
@@ -332,7 +365,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(propsOf(card).display).toBe('none')
     const trigger = triggerFor(tree, scope)
     expect(textOf(trigger)).toMatch(/^cql/)
-    expect(hoverOf(trigger as RenderElement)).toMatchObject({ scope, inverse: true })
+    expect(hoverOf(trigger as RenderElement)).toMatchObject({ scope, color: TEXT, backgroundColor: SELECTED })
     expect(String(scope).length).toBeLessThanOrEqual(64)
   })
 
@@ -340,9 +373,9 @@ for (const surface of ['terminal', 'desktop'] as const) {
     const pane = await mount($, on, call('ran'))
     const tree = await pane.drawn()
     const { card } = cardFor(tree, /^limit: Int/)
-    expect(textOf(card)).toMatch(/default\s+25/)
-    expect(textOf(card)).toMatch(/set\s+by the call/)
-    expect(textOf(card)).toMatch(/value\s+10/)
+    expect(textOf(card)).toMatch(/default:?\s+25/)
+    expect(textOf(card)).toMatch(/set:?\s+by the call/)
+    expect(textOf(card)).toMatch(/limit: Int = 10/)
     expect(textOf(card)).toMatch(/Page size/)
   })
 
@@ -355,7 +388,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
     const card = elements(tree).find(element => isCard(element) && hoverOf(element)?.scope === scope)
     expect(card).toBeDefined()
     expect(textOf(card)).toMatch(/Search Confluence with CQL/)
-    expect(textOf(card)).toMatch(/unset\s+sort: Confluence_Sort/)
+    expect(inlineDetail(call('ran'), 'r:hits')).toMatch(/sort: Confluence_Sort.*optional/)
   })
 
   test(`the policy meter carries a card naming the denied and masked fields (${surface})`, async ($, on) => {
@@ -368,7 +401,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(textOf(card)).toMatch(/masked\s+confluence_search\.results\.excerpt/)
     const trigger = triggerFor(tree, scope)
     expect(textOf(trigger)).toMatch(/^[▰▱]+$/)
-    expect(hoverOf(trigger as RenderElement)).toMatchObject({ scope, inverse: true })
+    expect(hoverOf(trigger as RenderElement)).toMatchObject({ scope, color: TEXT, backgroundColor: SELECTED })
   })
 }
 
@@ -378,43 +411,50 @@ for (const surface of ['terminal', 'desktop'] as const) {
   test(`a field card spells out type, policy, arguments and what came back (${surface})`, async ($, on) => {
     const pane = await mount($, on, call('ran'))
     const tree = await pane.drawn()
-    const results = textOf(cardFor(tree, /\.results · \[Confluence_SearchResultItem!\]!/).card)
+    const results = inlineDetail(call('ran'), 'f:hits.results')
     // The type in words, and what its marks mean.
     expect(results).toMatch(/list.*never null/)
-    expect(results).toMatch(/\[ \] is a list/)
+    expect(results).toMatch(/Confluence_SearchResultItem/)
     expect(results).toMatch(/7 rows/)
-    const secret = textOf(cardFor(tree, /\.secret · String/).card)
+    const secret = inlineDetail(call('ran'), 'f:hits.results.secret')
     expect(secret).toMatch(/denied/)
     expect(secret).toMatch(/pii-high/)
     expect(secret).toMatch(/requestable/)
     expect(secret).toMatch(/denied in 7 of 7 items/)
     const excerpt = textOf(cardFor(tree, /\.excerpt · String/).card)
-    expect(excerpt).toMatch(/masked/)
+    expect(excerpt).toMatch(/dry_run.*mask/)
     expect(excerpt).toMatch(/a string, may be null/)
     expect(textOf(cardFor(tree, /\.totalSize · Int/).card)).toMatch(/value\s+120/)
     expect(excerpt).not.toMatch(/\x1b/)
   })
 
-  test(`the root card lists every argument, the return type and the check results (${surface})`, async ($, on) => {
+  test(`root details retain submitted arguments and return type; Checks keeps check outcomes (${surface})`, async ($, on) => {
     const pane = await mount($, on, call('ran'))
     const tree = await pane.drawn()
     const verb = elements(tree).find(element => element.type === 'Text' && textOf(element) === 'SEARCH')
     const scope = hoverOf(verb as RenderElement)?.scope
-    const root = textOf(elements(tree).find(element => isCard(element) && hoverOf(element)?.scope === scope))
-    expect(root).toMatch(/cql: String! = .*from a variable/)
-    expect(root).toMatch(/limit: Int = 10.*default 25/)
-    expect(root).toMatch(/sort: Confluence_Sort \(unset, optional\)/)
-    expect(root).toMatch(/returns\s+Confluence_SearchResults: .*may be null/)
-    expect(root).toMatch(/validate/)
+    const root = inlineDetail(call('ran'), 'r:hits')
+    expect(root).toMatch(/cql: String!/)
+    expect(root).toMatch(/from a variable/)
+    expect(root).toMatch(/default:?\s+25/)
+    expect(root).toMatch(/sort: Confluence_Sort.*optional/)
+    expect(root).toMatch(/type: Confluence_SearchResults.*may be null/)
     expect(root).toMatch(/dry_run/)
-    expect(root).toMatch(/1 masked/)
-    expect(root).toMatch(/1 denied/)
+    const checks = inlineDetail(call('ran'), 'checks')
+    expect(checks).toMatch(/Schema validation.*valid/i)
+    expect(checks).toMatch(/Access check.*answered/i)
+    expect(checks).toMatch(/separate from permission to execute/)
   })
 
-  test(`the meter card tags each masked and denied path with its classification (${surface})`, async ($, on) => {
-    const pane = await mount($, on, call('ran'))
-    const { card } = cardFor(await pane.drawn(), /policy · \d+ fields/)
-    for (const fact of ['confluence_search.results.secret', 'pii-high', 'requestable', '1 masked', '1 denied']) expect(textOf(card)).toContain(fact)
+  test(`settled field details distinguish earlier masking from observed denial (${surface})`, async ($, on) => {
+    const one = call('ran')
+    const pane = await mount($, on, one)
+    expect(cardFor(await pane.drawn(), /Inspection checks/i).card).toBeDefined()
+    const masked = inlineDetail(one, 'f:hits.results.excerpt')
+    expect(masked).toMatch(/dry_run.*mask/)
+    expect(masked).not.toMatch(/execution response: denied/)
+    const denied = inlineDetail(one, 'f:hits.results.secret')
+    for (const fact of ['execution response: denied', 'pii-high', 'requestable']) expect(denied).toContain(fact)
   })
 
   test(`an argument card gives the value in full and its type in words (${surface})`, async ($, on) => {
@@ -455,8 +495,7 @@ const isStubCard = (element: Drawn) => String(element.props.key ?? '').startsWit
 function landing(tree: unknown, scope: unknown, total: number) {
   const found = laidOut(tree).find(({ element }) => element.props.key === `card:${scope}`)
   if (found === undefined) return undefined
-  const { element, top } = found
-  return element.props.top !== undefined ? { side: 'below', row: top + Number(element.props.top) } : { side: 'above', row: total - 1 - Number(element.props.bottom ?? 0) }
+  return { row: Number(found.element.props.top), rows: Number(found.element.props.height) }
 }
 
 /** The scope the drawn trigger whose text matches lights. */
@@ -469,11 +508,15 @@ function draw(one: InspectedCall, options: { bodyRows?: number; scrollOffset?: n
 
 test('a lit card pops up beside what lit it: under a trigger near the top of the view, over one near the bottom', () => {
   const { tree, rows } = draw(reviewCall('ran'))
-  const meter = rows.findIndex(row => row.includes('▰'))
-  expect(landing(tree, scopeLitBy(tree, /▰/), rows.length)).toEqual({ side: 'below', row: meter + 1 })
+  const checks = landing(tree, scopeLitBy(tree, /^Checks$/), rows.length)
+  expect(checks).toBeDefined()
+  expect(checks?.row).toBeGreaterThanOrEqual(0)
+  expect((checks?.row ?? 0) + (checks?.rows ?? 0)).toBeLessThanOrEqual(rows.length)
   const link = rows.findIndex(row => row.includes('this search in Jira'))
   expect(link).toBeGreaterThan(rows.length / 2)
-  expect(landing(tree, scopeLitBy(tree, /this search in Jira/), rows.length)).toEqual({ side: 'above', row: link - 1 })
+  const card = landing(tree, scopeLitBy(tree, /this search in Jira/), rows.length)
+  expect(card?.row).toBeLessThan(link)
+  expect((card?.row ?? 0) + (card?.rows ?? 0)).toBeLessThanOrEqual(rows.length)
 })
 
 test('a card opens toward the room in view: over a root low on a pane that fills its window, under it with blank rows below', () => {
@@ -481,11 +524,11 @@ test('a card opens toward the room in view: over a root low on a pane that fills
   const snug = draw(one)
   const at = snug.rows.findIndex(row => row.startsWith('┃ LIST'))
   const scope = scopeLitBy(snug.tree, /^LIST$/)
-  expect(landing(snug.tree, scope, snug.rows.length)).toEqual({ side: 'above', row: at - 1 })
+  expect(landing(snug.tree, scope, snug.rows.length)?.row).toBeLessThan(at)
   // The same pane in a window twice as tall: the room is under it now, under the root's header row (or rows, where its name wraps).
   const tall = draw(one, { bodyRows: snug.rows.length * 2 })
   const below = landing(tall.tree, scope, tall.rows.length)
-  expect(below?.side).toBe('below')
+  expect((below?.row ?? 0) + (below?.rows ?? 0)).toBeLessThanOrEqual(snug.rows.length * 2)
   expect(below?.row).toBeGreaterThan(at)
   expect(below?.row).toBeLessThanOrEqual(tall.rows.findIndex(row => row.includes('orgId')))
 })
@@ -526,7 +569,7 @@ test('every name drawn in a return tree lights a card with its coordinate, its t
         const scope = hoverScope(cardId.field(field.path))
         const text = cardText(all, scope)
         expect(`${columns} ${field.path}: ${triggerOf(all, scope) !== undefined}`).toBe(`${columns} ${field.path}: true`)
-        expect(`${columns} ${field.path}: ${text.includes(field.coordinate) && /type\s+\S/.test(text) && /policy\s+\S/.test(text)}`).toBe(`${columns} ${field.path}: true`)
+        expect(`${columns} ${field.path}: ${text.includes(field.coordinate) && /type:?\s+\S/.test(text) && /policy:?\s+\S/.test(text)}`).toBe(`${columns} ${field.path}: true`)
       }
     }
   }
@@ -556,7 +599,7 @@ test('the header teaches: the badge, the services, the operation name, the statu
   expect(of(cardId.op()).trigger).toMatch(/ReviewSample/)
   expect(of(cardId.op()).text).toMatch(/agent/)
   expect(of(cardId.status()).text).toMatch(/ran/)
-  expect(of(cardId.credit()).trigger).toMatch(/summary · Haiku/)
+  expect(of(cardId.credit()).trigger).toMatch(/Haiku/)
   for (const fact of ['Haiku', 'operation', 'schema']) expect(of(cardId.credit()).text).toContain(fact)
 })
 
@@ -568,7 +611,7 @@ test('a RESULT rows line says what each part of it means and how the list goes o
   expect(cardText(laidOut(gnarly.tree).map(({ element }) => element), scopeLitBy(gnarly.tree, /^total {2}412$/))).toMatch(/Jira_Count\.count/)
 })
 
-test('the context line lights a card: what the response cost in context, each heavy field with its size and share, and what the result would be without it', () => {
+test('the receipt lights a compact card with response size and byte contributors', () => {
   const heavy = draw(heavyCall())
   // The line is drawn under RESULT, and a flag says the one field is most of it (the line does not say it again).
   expect(heavy.rows.join('\n')).toMatch(/\d+\sKB\s·\sabout\s[\d.]+k\stokens/)
@@ -577,16 +620,16 @@ test('the context line lights a card: what the response cost in context, each he
   const scope = hoverScope(cardId.weight())
   expect(triggerOf(all, scope)).toBeDefined()
   const card = cardText(all, scope)
-  expect(card).toMatch(/Claude read this whole response/)
+  expect(card).toMatch(/Response size/)
   expect(card).toMatch(/issues\.fields\.description/)
-  expect(card).toMatch(/\d+% of the response/)
-  expect(card).toMatch(/40 rows, about/)
-  expect(card).toMatch(/Without issues\.fields\.description/)
+  expect(card).toMatch(/\d+% of response/)
+  expect(card).not.toMatch(/Claude read|Without|40 rows|schema does not describe/)
+  expect(card.length).toBeLessThan(250)
   // It is an estimate, and says so.
   expect(card).toMatch(/estimat/i)
   // Kept out of the context, it says that instead, with and without the file read back.
-  expect(cardText(drawnOf(persistedCall()), scope)).toMatch(/kept this response out of Claude's context/)
-  expect(cardText(drawnOf(keptOutCall()), scope)).toMatch(/did not read the file/)
+  expect(cardText(drawnOf(persistedCall()), scope)).toMatch(/Only a preview and file path were returned/)
+  expect(cardText(drawnOf(keptOutCall()), scope)).toMatch(/file contents not inspected/)
   const kept = draw(keptOutCall()).rows.join(' ')
   for (const fact of ['saved to a file', 'preview', 'path']) expect(kept).toContain(fact)
 })
@@ -601,9 +644,17 @@ test("a RESULT row's ▸ lights a card saying it shows every field of the row, a
 
 test('every argument name lights a card, one left to its default too: what kind of value it takes, its type in words', () => {
   const all = drawnOf(call('pending'))
-  expect(cardText(all, hoverScope(cardId.arg('hits', 'cql')))).toMatch(/a CQL query/)
+  expect(cardText(all, hoverScope(cardId.arg('hits', 'cql')))).toMatch(/Query in CQL/)
   const start = cardText(all, hoverScope(cardId.arg('hits', 'start')))
-  expect(start).toMatch(/server uses its default/)
-  expect(start).toMatch(/an offset/)
+  expect(start).toMatch(/schema default.*omitted/)
+  expect(start).toMatch(/default 0/)
+  expect(start).toMatch(/Int/)
   expect(triggerOf(all, hoverScope(cardId.arg('hits', 'start')))).toBeDefined()
+})
+
+
+test('compact hover wrapping preserves graphemes and makes progress at a one-cell width', () => {
+  expect(pretty('🇫🇷🇫🇷', 3)).toEqual(['🇫🇷', '🇫🇷'])
+  expect(pretty('界', 1).join('')).toBe('界')
+  expect(pretty('e\u0301e\u0301', 1)).toEqual(['e\u0301', 'e\u0301'])
 })

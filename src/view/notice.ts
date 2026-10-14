@@ -12,6 +12,9 @@ import { isDestructiveName, isWriteName } from '../risk.ts'
 import { changePhrase } from '../preview/changes.ts'
 import { WRITES_DATA, flagsOf, flagsText, productOf, servicesOf } from './flags.ts'
 import { isAllAllowed } from './outcome.ts'
+import type { InspectedCall } from '../../types'
+import { countText, dryRunEvidenceOf, lookupMissingEvidence, searchCountOf } from './checks.ts'
+import { esc } from './kit.ts'
 
 const VERB = { query: 'reads', mutation: 'writes', subscription: 'watches' } as const
 
@@ -67,4 +70,54 @@ export function noticeOf(ir: CallIR, outcome?: CallOutcome): string | undefined 
   const verdict = flags.length > 0 ? `⚑ ${quotedGlyphs(flagsText(flags))}` : ir.opType !== 'mutation' && isAllAllowed(ir, outcome) ? (allow === 1 ? `✓ 1 field allowed` : `✓ all ${allow} fields allowed`) : undefined
   const parts = [lead, verdict, where].filter(part => part !== undefined)
   return parts.length === 0 ? undefined : parts.join(' · ')
+}
+
+const plural = (count: number, one: string) => `${count} ${one}${count === 1 ? '' : 's'}`
+
+/** The first names of a list, then `+N`. */
+const firstNames = (names: readonly string[], count = 2) => `${names.slice(0, count).join(', ')}${names.length > count ? ` +${names.length - count}` : ''}`
+
+/**
+ * The line under a lookup's row: what Claude's search, introspect, validate
+ * or dry_run found, from its answer only. `found 3: confluence_search,
+ * glean_search +1 · in Confluence, Glean, Jira`, `Confluence_SearchResult · 3
+ * fields`, `✓ valid` or `⚑ will fail: …`, `dry run · ⚑ email denied`.
+ * Undefined until the answer is read; a failed call says Agent Services' error, when it sent one.
+ */
+export function lookupNoticeOf(call: InspectedCall): string | undefined {
+  const found = call.found
+  if (call.tool !== undefined && call.status === 'errored' && found?.error !== undefined) return `✕ ${quotedGlyphs(esc(found.error, 200))}`
+  if (call.tool === undefined || call.status !== 'ran' || found === undefined) return undefined
+  if (found.unreadable !== undefined) return call.ir.checks?.context?.some(one => one.outcome === 'failed' && one.reason === 'missing-data') ? lookupMissingEvidence(call) : '⚑ the answer could not be read'
+  const roots = call.ir.roots
+  const products = [...new Set(servicesOf(call.ir).flatMap(service => productOf(service) ?? []))]
+  const where = products.length === 0 ? undefined : quotedGlyphs(`in ${products.join(', ')}`)
+  if (call.tool === 'search') {
+    const count = searchCountOf(call)
+    if (count === undefined || count.kind === 'unknown') return lookupMissingEvidence(call)
+    if ((call.input?.terms ?? []).length === 0) return `lists ${countText(count, 'service')}`
+    if (count.kind === 'exact' && count.value === 0) return 'no operations matched in the complete response'
+    return [quotedGlyphs(`found ${countText(count, 'match')}${roots.length === 0 ? '' : `: ${firstNames(roots.map(root => esc(root.name, 120)))}`}`), where].filter(part => part !== undefined).join(SEP)
+  }
+  if (call.tool === 'introspect') {
+    const root = roots[0]
+    if (root === undefined || found.typeKind === undefined || found.typeKind === 'unavailable' || found.typeKind === 'absent') return lookupMissingEvidence(call)
+    if (root.children.length === 0 && (found.members ?? []).length === 0) return quotedGlyphs(`${esc(root.name, 200)} · ${found.typeKind === 'input' ? 'input object' : found.typeKind}`)
+    const member = found.members !== undefined
+    const count = countText(member ? found.counts?.members : found.counts?.fields, member ? 'member' : 'field')
+    return quotedGlyphs(`${esc(root.name, 200)} · ${count}`)
+  }
+  if (call.tool === 'validate') {
+    if (call.ir.validation === undefined) return lookupMissingEvidence(call)
+    if (call.ir.validation.valid === true) return '✓ valid'
+    const first = (call.ir.validation?.diagnostics[0] ?? '').trim().split('\n')[0]?.replace(/^Error:\s*/, '') ?? ''
+    const more = (found.problems ?? 0) > 1 ? ` +${(found.problems ?? 0) - 1} more` : ''
+    return `⚑ will fail: ${quotedGlyphs(esc(first, 200))}${more}`
+  }
+  const { requests, failed, incomplete } = dryRunEvidenceOf(call)
+  if (requests.length === 0) return lookupMissingEvidence(call)
+  const flags = flagsOf(call.ir, undefined, false).filter(flag => flag.text !== WRITES_DATA)
+  const { allow } = leafPolicyCounts(roots)
+  const verdict = flags.length > 0 ? `⚑ ${quotedGlyphs(flagsText(flags))}` : allow > 0 && isAllAllowed(call.ir, undefined) ? (allow === 1 ? '✓ 1 field allowed' : `✓ all ${allow} fields allowed`) : undefined
+  return ['dry run', verdict, failed > 0 ? `${plural(failed, 'request')} failed` : undefined, incomplete ? 'some request outcomes unavailable' : undefined, where].filter(part => part !== undefined).join(SEP)
 }

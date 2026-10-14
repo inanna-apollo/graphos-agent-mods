@@ -17,25 +17,29 @@
 
 import type { RenderNode, RenderSurface, TextHoverProps } from 'claude-code'
 
-import type { InspectedCall } from '../types'
+import type { InspectedCall, CallOverview } from '../types'
 import { configOf, linksOf, openableUrl } from './links.ts'
 import type { LinkConfig } from './links.ts'
-import type { Nav, Shown } from './queue.ts'
+import type { ResolvedNav as Nav, ResolvedShown as Shown } from './queue.ts'
 import { annotationIndex } from './view/annotations.ts'
 import { RootForm } from './view/form.tsx'
-import { Header, HeaderRule, SummaryLine } from './view/header.tsx'
+import { lookupBody } from './view/lookups.ts'
+import { detailOf, detailPage, retentionReason } from './view/details.ts'
+import { Header, SummaryLine } from './view/header.tsx'
 import type { Act, Ctx, Kit, PaneUi } from './view/kit.ts'
 import { CLOSED, esc } from './view/kit.ts'
 import { listNames } from './view/notes.ts'
-import { OPENED_INDENT, REQUEST_LABEL, ROW_INDENT, RESULT_INDENT, cardId, cellWidth, closedItem, fieldNameColumn, fieldValueText, hostOf, isHostBeside, openedFields, isResultInline, linkFacts, linkLabel, listKey, nameRows, planOf, moreKey, moreLabel, previewItemRows, previewLayout, previewLead, requestRows, rowKey, shownLabel, wrapLines } from './view/plan.ts'
+import { OPENED_INDENT, REQUEST_LABEL, ROW_INDENT, RESULT_INDENT, cardId, hasNoteCard, cellWidth, closedItem, fieldNameColumn, fieldValueText, hostOf, isHostBeside, openedFields, isResultInline, linkFacts, linkLabel, listKey, nameRows, planOf, moreKey, moreLabel, previewItemRows, previewLayout, previewLead, requestRows, rowKey, shownLabel, wrapLines } from './view/plan.ts'
 import type { Plan, RootPlan } from './view/plan.ts'
 import type { ResultLine } from './view/outcome.ts'
 import { ACCENT, COLOR, NOTE_GLYPH, Note, RIGHT_PAD, STRUCT, statusOf, struct } from './view/ui/index.tsx'
-import { GLYPH } from './view/ui/theme.ts'
+import { BACKGROUND, TEXT, QUIET, GLYPH, DATA } from './view/ui/theme.ts'
 import { REQUEST_TEXT, requestDraftFor } from './view/flags.ts'
+import { badgeOf, callStatusOf, headlineOf, lookupNotes, profileOf, subjectOf } from './view/kinds.ts'
+import type { Note as NoteFacts } from './view/notes.ts'
 import { Shimmer } from './view/live/index.tsx'
-import { Fact, Frame, Para, agentHover, detailCards, flagsHover, headerCards, idHover, linkHover, linkScope, trustHover } from './view/ui/hover.tsx'
-import { TRUST_FILE } from './view/trust.ts'
+import { CompactFacts, Fact, Frame, Para, agentHover, detailCards, flagsHover, headerCards, idHover, linkHover, linkScope, trustHover } from './view/ui/hover.tsx'
+import { trustFacts } from './view/trust.ts'
 import { RowTip, markdownLink, previewHover, previewScope, resultCards, toggleCards } from './view/ui/preview-cards.tsx'
 import { Changes, ConfirmCard, ConfirmLine, changeCards } from './view/diff.tsx'
 
@@ -50,8 +54,8 @@ function Unparseable({ ctx, call }: { ctx: Ctx; call: InspectedCall }) {
       <Text color={COLOR.fail} wrap="wrap">
         {`Could not read this operation (${esc(call.ir.failure ?? call.inputError ?? 'unknown reason', 300)}). Showing it as sent:`}
       </Text>
-      <Code source={esc(call.operation)} language="graphql" wrap="wrap" />
-      {call.variables !== '' && <Code source={esc(call.variables)} language="json" wrap="wrap" />}
+      <Box backgroundColor="userMessageBackground"><Code source={esc(call.operation)} language="graphql" wrap="wrap" /></Box>
+      {call.variables !== '' && <Box backgroundColor="userMessageBackground"><Code source={esc(call.variables)} language="json" wrap="wrap" /></Box>}
     </Box>
   )
 }
@@ -92,17 +96,18 @@ function Notes({ ctx, plan, gap }: { ctx: Ctx; plan: Plan['notes']; gap: number 
         // Live while enrichment runs; settled calls never shimmer.
         if (note.glyph === GLYPH.checking && !ctx.isSettled) return <Shimmer kit={kit} text={note.text} />
         // A field's line keeps its name at full strength: the name is content, its policy word the dim detail.
-        const isDim = (ctx.isSettled && note.detail === undefined) || note.isDim === true
+        const isMember = note.glyph === '├' || note.glyph === '╰'
+        const isDim = (!isMember && ctx.isSettled && note.detail === undefined) || note.isDim === true
         const color = isDim || note.detail !== undefined ? undefined : note.color
         // The glyph keeps its hue, dim once settled: a policy note's color, else its structural hue (◆ personal, ↯ limit).
         const glyphColor = note.isDim === true ? undefined : (note.color ?? NOTE_HUE[note.glyph])
         return (
-          <Note kit={kit} glyph={note.glyph} {...(glyphColor !== undefined && { color: glyphColor })} {...(isDim && { isDim: true })}>
-            <Text color={color}>{note.text}</Text>
+          <Note kit={kit} glyph={note.glyph} {...(glyphColor !== undefined && { color: glyphColor })} {...(isDim && { isDim: true })} {...(hasNoteCard(note) && { hover: idHover(cardId.note(shown.index)) })}>
+            <Text color={color ?? (isDim ? QUIET : TEXT)}>{note.text}</Text>
             {note.names !== undefined && ` ${listNames(note.names, shown.names)}`}
-            {note.detail !== undefined && <Text dimColor>{`  ${note.detail}`}</Text>}
-            {shown.hasHint && note.hint !== undefined && <Text dimColor>{` · ${note.hint}`}</Text>}
-            {shown.more !== undefined && <Text dimColor>{` +${shown.more} more`}</Text>}
+            {note.detail !== undefined && <Text color={QUIET}>{`  ${note.detail}`}</Text>}
+            {shown.hasHint && note.hint !== undefined && <Text color={QUIET}>{` · ${note.hint}`}</Text>}
+            {shown.more !== undefined && <Text color={QUIET}>{` +${shown.more} more`}</Text>}
           </Note>
         )
       })}
@@ -111,7 +116,7 @@ function Notes({ ctx, plan, gap }: { ctx: Ctx; plan: Plan['notes']; gap: number 
 }
 
 /** A note glyph's structural hue, when the note has no policy color of its own. */
-const NOTE_HUE: Record<string, string> = { [GLYPH.personal]: STRUCT.personal, [GLYPH.limit]: STRUCT.limit }
+const NOTE_HUE: Record<string, string> = { [GLYPH.section]: ACCENT, [GLYPH.personal]: STRUCT.personal, [GLYPH.limit]: STRUCT.limit }
 
 /**
  * What the call did, once it settled: errors and links to fix first, then
@@ -132,7 +137,7 @@ function Result({ ctx, plan, gap }: { ctx: Ctx; plan: Plan['result']; gap: numbe
     <Box flexDirection="column" marginTop={gap}>
       <Box flexDirection="row">
         <Box flexShrink={0}>
-          <Text>
+          <Text color={TEXT}>
             <Text color={STRUCT.bar}>{`${GLYPH.section} `}</Text>
             <Text bold color={STRUCT.result}>
               RESULT
@@ -167,11 +172,11 @@ function ResultLineView({ ctx, line, index }: { ctx: Ctx; line: ResultLine; inde
     const isHead = line.kind === 'rows' && line.isHead === true
     const numberTone = line.kind === 'rows' && line.isWarn === true ? { color: COLOR.mask, bold: true } : struct(STRUCT.number, false, { bold: true })
     return (
-      <Text wrap="wrap" hover={idHover(cardId.line(index))}>
+      <Text color={TEXT} wrap="wrap" hover={idHover(cardId.line(index))}>
         <Text bold={isHead}>{line.field}</Text>
-        {line.field !== '' && <Text dimColor>{'  '}</Text>}
-        {line.kind === 'scalar' && line.isDim === true ? <Text dimColor>{line.text}</Text> : <Text {...numberTone}>{line.text}</Text>}
-        {line.kind === 'rows' && line.note !== undefined && <Text dimColor>{`${GLYPH.separator}${line.note}`}</Text>}
+        {line.field !== '' && <Text color={QUIET}>{'  '}</Text>}
+        {line.kind === 'scalar' && line.isDim === true ? <Text color={QUIET}>{line.text}</Text> : <Text {...numberTone}>{line.text}</Text>}
+        {line.kind === 'rows' && line.note !== undefined && <Text color={QUIET}>{`${GLYPH.separator}${line.note}`}</Text>}
       </Text>
     )
   }
@@ -182,7 +187,7 @@ function ResultLineView({ ctx, line, index }: { ctx: Ctx; line: ResultLine; inde
   if (line.kind === 'weight') {
     // How much of Claude's context the response used: dim, and a trigger for the card that lists the heavy fields.
     return (
-      <Text wrap="wrap" dimColor hover={idHover(cardId.weight())}>
+      <Text wrap="wrap" color={QUIET} hover={idHover(cardId.weight())}>
         {line.text}
       </Text>
     )
@@ -204,13 +209,13 @@ function ResultLineView({ ctx, line, index }: { ctx: Ctx; line: ResultLine; inde
           <Box flexDirection="row" paddingLeft={NOTE_GLYPH}>
             {requestRows(facts, width).isOneRow ? (
               <Box flexDirection="row">
-                {facts !== '' && <Text dimColor>{`${facts} · `}</Text>}
+                {facts !== '' && <Text color={QUIET}>{`${facts} · `}</Text>}
                 {press}
               </Box>
             ) : (
               <Box flexDirection="column">
                 {facts !== '' && (
-                  <Text dimColor wrap="wrap">
+                  <Text color={QUIET} wrap="wrap">
                     {facts}
                   </Text>
                 )}
@@ -236,14 +241,14 @@ function ResultLineView({ ctx, line, index }: { ctx: Ctx; line: ResultLine; inde
       return (
         <Box flexDirection="row">
           <Box width={NOTE_GLYPH} flexShrink={0}>
-            <Text>{GLYPH.link}</Text>
+            <Text color={TEXT}>{GLYPH.link}</Text>
           </Box>
           <Box flexShrink={1}>
             <LinkLabel ctx={ctx} id={`auth:${line.service}`} url={line.url} label={line.text} />
           </Box>
           {isHostShown && (
             <Box flexShrink={0}>
-              <Text dimColor>{`  ${line.host}`}</Text>
+              <Text color={QUIET}>{`  ${line.host}`}</Text>
             </Box>
           )}
         </Box>
@@ -252,8 +257,8 @@ function ResultLineView({ ctx, line, index }: { ctx: Ctx; line: ResultLine; inde
     return (
       <Note kit={kit} glyph={GLYPH.link}>
         {line.url !== null && Link !== undefined ? <Text color={COLOR.link}><Link href={line.url} label={`[${line.text}]`} /></Text> : line.text}
-        {line.host !== undefined && <Text dimColor>{`  ${line.host}`}</Text>}
-        {line.url !== null && Link === undefined && <Text dimColor>{` ${line.url}`}</Text>}
+        {line.host !== undefined && <Text color={QUIET}>{`  ${line.host}`}</Text>}
+        {line.url !== null && Link === undefined && <Text color={QUIET}>{` ${line.url}`}</Text>}
       </Note>
     )
   }
@@ -300,11 +305,11 @@ function PreviewRows({ ctx, line }: { ctx: Ctx; line: Extract<ResultLine, { kind
         const act = ctx.act
         const keyElement =
           url !== undefined && Markdown !== undefined && act !== undefined ? (
-            <Markdown key={`open:row:${list}:${index}`} text={markdownLink(shown, url)} onLinkPress={() => act({ openUrl: url })} pressableLinks={[url]} />
+            <Box backgroundColor="userMessageBackground"><Markdown key={`open:row:${list}:${index}`} text={markdownLink(shown, url)} onLinkPress={() => act({ openUrl: url })} pressableLinks={[url]} /></Box>
           ) : url !== undefined && canOpen(ctx) ? (
             <OpenButton ctx={ctx} id={`row:${list}:${index}`} url={url} label={shown} hover={previewHover(list, index)} />
           ) : (
-            <Text wrap="wrap" hover={previewHover(list, index)} {...(url !== undefined && { color: COLOR.link })}>
+            <Text color={TEXT} wrap="wrap" hover={previewHover(list, index)} {...(url !== undefined && { color: COLOR.link })}>
               {url !== undefined && Link !== undefined ? <Link href={url} label={shown} /> : shown}
             </Text>
           )
@@ -335,7 +340,7 @@ function PreviewRows({ ctx, line }: { ctx: Ctx; line: Extract<ResultLine, { kind
                 {keyElement}
               </Box>
               <Box flexGrow={1} flexShrink={1} marginLeft={gap}>
-                <Text wrap="wrap" hover={previewHover(list, index)}>
+                <Text color={TEXT} wrap="wrap" hover={previewHover(list, index)}>
                   {drawn.text !== undefined && <Text>{drawn.text}</Text>}
                   {item.extra !== undefined && <Text {...struct(STRUCT.date)}>{`${item.text === undefined ? '' : '  '}${item.extra}`}</Text>}
                   {pad > 0 && ' '.repeat(pad)}
@@ -344,7 +349,7 @@ function PreviewRows({ ctx, line }: { ctx: Ctx; line: Extract<ResultLine, { kind
                     <Text>
                       {lead !== '' || pad > 0 || at > 0 ? '  ' : ''}
                       <Text color={COLOR.deny}>{GLYPH.deny}</Text>
-                      <Text dimColor>{` ${one.field}`}</Text>
+                      <Text color={QUIET}>{` ${one.field}`}</Text>
                     </Text>
                   ))}
                 </Text>
@@ -361,7 +366,7 @@ function PreviewRows({ ctx, line }: { ctx: Ctx; line: Extract<ResultLine, { kind
           {line.expand !== undefined && ctx.act !== undefined && kit.Button !== undefined && ctx.callId !== undefined ? (
             <kit.Button key={`more:${list}`} plain label={moreLabel(line)} onPress={() => ctx.act?.({ more: line.expand === 'more' && ctx.callId !== undefined ? moreKey(ctx.callId, list) : null })} />
           ) : (
-            <Text dimColor wrap="wrap">
+            <Text color={QUIET} wrap="wrap">
               {moreLabel(line)}
             </Text>
           )}
@@ -406,18 +411,18 @@ function OpenedRow({ ctx, item }: { ctx: Ctx; item: Extract<ResultLine, { kind: 
           <Box key={`field:${index}`} flexDirection="row">
             {/* A name wider than its column breaks into rows there (nameRows), as the plan counts it. */}
             <Box width={names} flexShrink={0}>
-              <Text dimColor>{nameRows(field.name, names).join('\n')}</Text>
+              <Text color={QUIET}>{nameRows(field.name, names).join('\n')}</Text>
             </Box>
             <Box flexGrow={1} flexShrink={1} marginLeft={2}>
               {field.denial !== undefined ? (
-                <Text wrap="wrap">
+                <Text color={TEXT} wrap="wrap">
                   <Text color={COLOR.deny}>{GLYPH.deny}</Text>
-                  <Text dimColor>{fieldValueText(field, false).slice(GLYPH.deny.length)}</Text>
+                  <Text color={QUIET}>{fieldValueText(field, false).slice(GLYPH.deny.length)}</Text>
                 </Text>
               ) : url !== undefined ? (
                 <LinkLabel ctx={ctx} id={`field:${index}:${url}`} url={url} label={url} />
               ) : (
-                <Text wrap="wrap">{field.value ?? ''}</Text>
+                <Text color={TEXT} wrap="wrap">{field.value ?? ''}</Text>
               )}
             </Box>
           </Box>
@@ -445,10 +450,10 @@ function Flags({ ctx, plan }: { ctx: Ctx; plan: Plan['flags'] }) {
         </Text>
       </Box>
       <Box flexGrow={1} flexShrink={1} flexDirection="column">
-        <Text wrap="wrap" hover={flagsHover()}>
+        <Text color={TEXT} wrap="wrap" hover={flagsHover()}>
           {plan.all.map((flag, index) => (
             <Text>
-              {index > 0 && <Text dimColor>{GLYPH.separator}</Text>}
+              {index > 0 && <Text color={QUIET}>{GLYPH.separator}</Text>}
               {flag.text}
               {flag.request !== undefined && plan.draft === undefined && <Text>{`${GLYPH.separator}${REQUEST_TEXT}`}</Text>}
             </Text>
@@ -480,21 +485,20 @@ function RequestButton({ ctx, draft }: { ctx: Ctx; draft: string }) {
  * never cut; its card says what fit where.
  */
 function Trust({ ctx, plan }: { ctx: Ctx; plan: Plan['trust'] }) {
-  const { Box, Text } = ctx.kit
+  const { Box, Text, Button } = ctx.kit
   const line = plan.line
   if (line === undefined) return null
-  const isAllowed = line.tone === 'allow'
   return (
     <Box flexDirection="row">
       <Box width={NOTE_GLYPH} flexShrink={0}>
-        <Text color={isAllowed ? COLOR.allow : undefined} dimColor={!isAllowed} hover={trustHover()}>
-          {isAllowed ? GLYPH.allow : GLYPH.bullet}
+        <Text color={QUIET} hover={trustHover()}>
+          {GLYPH.bullet}
         </Text>
       </Box>
       <Box flexGrow={1} flexShrink={1} flexDirection="column">
-        <Text wrap="wrap" dimColor={!isAllowed} hover={trustHover()}>
-          {line.text}
-        </Text>
+        {ctx.act !== undefined && Button !== undefined
+          ? <Button key="trust" plain label={line.text} hover={trustHover()} onPress={() => ctx.act?.({ detail: ctx.ui.detail?.callId === ctx.callId && ctx.ui.detail?.detailId === 'trust' ? null : { callId: ctx.callId ?? '', detailId: 'trust' } })}><Text color={QUIET}>{line.text}</Text></Button>
+          : <Text wrap="wrap" color={QUIET} hover={trustHover()}>{line.text}</Text>}
       </Box>
     </Box>
   )
@@ -505,26 +509,9 @@ function TrustCard({ ctx, plan }: { ctx: Ctx; plan: Plan['trust'] }) {
   const { Text } = ctx.kit
   const fit = plan.line?.fit
   if (fit === undefined) return null
-  const rows: RenderNode[] = fit.isAllowed
-    ? [
-        <Para ctx={ctx} text="Your trust rules let this call run without a permission dialog: every root it selects fits one." />,
-        ...fit.fits.flatMap(one => [
-          <Text wrap="wrap">
-            <Text bold>{esc(one.root, 300)}</Text>
-            <Text dimColor>{' fits '}</Text>
-            <Text color={COLOR.allow}>{esc(one.rule, 300)}</Text>
-          </Text>,
-          ...one.reasons.map(reason => <Para ctx={ctx} dim indent={2} text={esc(reason, 600)} />),
-        ]),
-      ]
-    : [
-        <Para ctx={ctx} text={esc(fit.reason, 2_000)} />,
-        <Para ctx={ctx} dim text="A call runs unasked only when every root it selects fits a rule: the same fields or fewer, and each argument the rule names set to a value it allows." />,
-      ]
   return (
-    <Frame ctx={ctx} id={cardId.trust()} title={fit.isAllowed ? 'trust rules · ran without asking' : 'trust rules · asked'}>
-      {rows}
-      <Para ctx={ctx} dim text={`Rules: ${TRUST_FILE}; /gas trust reloads them. A pattern matches the text, not what it means.`} />
+    <Frame ctx={ctx} id={cardId.trust()} title="Trust rules · permission decision">
+      <CompactFacts ctx={ctx} lines={trustFacts(fit)} hint={ctx.isSettled ? 'Enter on the trust line: full context · d: all details' : 'Preview · permission facts stay in the pane'} />
     </Frame>
   )
 }
@@ -541,12 +528,12 @@ function Agent({ ctx, plan }: { ctx: Ctx; plan: Plan['agent'] }) {
   return (
     <Box flexDirection="row">
       <Box width={NOTE_GLYPH} flexShrink={0}>
-        <Text dimColor hover={agentHover()}>
+        <Text color={QUIET} hover={agentHover()}>
           {GLYPH.agent}
         </Text>
       </Box>
       <Box flexGrow={1} flexShrink={1} flexDirection="column">
-        <Text wrap="wrap" hover={agentHover()}>
+        <Text color={TEXT} wrap="wrap" hover={agentHover()}>
           {line.text}
         </Text>
       </Box>
@@ -577,6 +564,22 @@ function AgentCard({ ctx, plan }: { ctx: Ctx; plan: Plan['agent'] }) {
   )
 }
 
+/** Each note's card, where the note has more to say than its line: a diagnostic's whole text, or every name it lists. */
+function noteCards(ctx: Ctx, plan: Plan['notes']): RenderNode[] {
+  const { Text } = ctx.kit
+  return plan.shown.flatMap(shown => {
+    const note: NoteFacts | undefined = plan.all[shown.index]
+    if (note === undefined || !hasNoteCard(note)) return []
+    return [
+      <Frame ctx={ctx} id={cardId.note(shown.index)} title={`${note.glyph} ${note.text}`}>
+        {note.card !== undefined && note.card.map(line => <Text color={TEXT} wrap="wrap">{line === '' ? ' ' : line}</Text>)}
+        {note.names !== undefined && <Para ctx={ctx} text={note.names.join(', ')} />}
+        {note.hint !== undefined && <Para ctx={ctx} dim text={note.hint} />}
+      </Frame>,
+    ]
+  })
+}
+
 /** The flags' card: each flag in full, one per row. */
 function FlagsCard({ ctx, plan }: { ctx: Ctx; plan: Plan['flags'] }) {
   const { Text } = ctx.kit
@@ -584,7 +587,7 @@ function FlagsCard({ ctx, plan }: { ctx: Ctx; plan: Plan['flags'] }) {
   return (
     <Frame ctx={ctx} id={cardId.flags()} title={`flags · ${plan.all.length}`}>
       {plan.all.map(flag => (
-        <Text wrap="wrap">
+        <Text color={TEXT} wrap="wrap">
           <Text color={flag.tone === 'deny' || flag.tone === 'write' ? COLOR.deny : COLOR.mask}>{`${GLYPH.flag} `}</Text>
           {flag.detail}
         </Text>
@@ -618,19 +621,19 @@ function Links({ ctx, plan, ir, outcome, gap }: { ctx: Ctx; plan: Plan['links'];
         return (
           <Box key={`link:${index}`} flexDirection="row" hover={{ scope: linkScope(index) }}>
             <Box width={NOTE_GLYPH} flexShrink={0}>
-              <Text dimColor>{GLYPH.link}</Text>
+              <Text color={QUIET}>{GLYPH.link}</Text>
             </Box>
             <Box flexShrink={1}>
               <LinkLabel ctx={ctx} id={`link:${index}`} url={link.url} label={label} hover={linkHover(index)} />
             </Box>
             {Link === undefined && !canOpen(ctx) && (
               <Box flexShrink={1}>
-                <Text dimColor wrap="wrap">{` ${link.url}`}</Text>
+                <Text color={QUIET} wrap="wrap">{` ${link.url}`}</Text>
               </Box>
             )}
             {(Link !== undefined || canOpen(ctx)) && isHostShown && (
               <Box flexShrink={1}>
-                <Text dimColor wrap="truncate-end">{`  ${host}`}</Text>
+                <Text color={QUIET} wrap="truncate-end">{`  ${host}`}</Text>
               </Box>
             )}
             {hasHotkey && Button !== undefined && act !== undefined && (
@@ -656,10 +659,10 @@ const OPEN_HINT = 9
  * click or cmd-click opens it); without that, the label alone.
  */
 function LinkLabel({ ctx, id, url, label, hover }: { ctx: Ctx; id: string; url: string; label: string; hover?: TextHoverProps }) {
-  const { Text, Link, Markdown } = ctx.kit
+  const { Box, Text, Link, Markdown } = ctx.kit
   const act = ctx.act
   const shown = `[${label}]`
-  if (Markdown !== undefined && act !== undefined) return <Markdown key={`open:${id}`} text={markdownLink(shown, url)} onLinkPress={() => act({ openUrl: url })} pressableLinks={[url]} />
+  if (Markdown !== undefined && act !== undefined) return <Box backgroundColor="userMessageBackground"><Markdown key={`open:${id}`} text={markdownLink(shown, url)} onLinkPress={() => act({ openUrl: url })} pressableLinks={[url]} /></Box>
   if (canOpen(ctx)) return <OpenButton ctx={ctx} id={id} url={url} label={shown} {...(hover !== undefined && { hover })} />
   return (
     <Text wrap="wrap" color={COLOR.link} {...(hover !== undefined && { hover })}>
@@ -684,8 +687,8 @@ function linkCards(ctx: Ctx, plan: Plan['links'], ir: InspectedCall['ir'], outco
   const { Text } = ctx.kit
   return plan.shown.map((link, index) => (
     <Frame ctx={ctx} id={cardId.link(index)} title={linkLabel(link, ir, outcome, plan.shown.length > 1)}>
-      {linkFacts(link, ir).query !== undefined && <Text wrap="wrap">{esc(linkFacts(link, ir).query ?? '', 600)}</Text>}
-      <Text dimColor wrap="wrap">{`opens on ${esc(hostOf(link.url), 80)}`}</Text>
+      {linkFacts(link, ir).query !== undefined && <Text color={TEXT} wrap="wrap">{esc(linkFacts(link, ir).query ?? '', 600)}</Text>}
+      <Text color={QUIET} wrap="wrap">{`opens on ${esc(hostOf(link.url), 80)}`}</Text>
     </Frame>
   ))
 }
@@ -698,13 +701,12 @@ function Empty({ kit, bodyRows }: { kit: Kit; bodyRows: number | undefined }) {
   return (
     <Box flexDirection="column" alignItems="center" paddingRight={RIGHT_PAD}>
       <Box height={above} />
-      <Text bold>No GraphOS Agent Services call yet.</Text>
-      <Text dimColor wrap="wrap">
-        Each Agent Services execute call shows here before you approve it.
+      <Text color={TEXT} bold>No GraphOS Agent Services call yet.</Text>
+      <Text color={QUIET} wrap="wrap">
+        Each Agent Services call shows here: an execute before you approve it, and Claude's searches and checks as they run.
       </Text>
-      <Text dimColor wrap="wrap">
-        {'Open this pane any time with '}
-        <Text color={ACCENT}>/gas</Text>
+      <Text color={QUIET} wrap="wrap">
+        Ask Claude to find an operation for your task; its discovery and checks will appear here.
       </Text>
     </Box>
   )
@@ -718,8 +720,17 @@ function Empty({ kit, bodyRows }: { kit: Kit; bodyRows: number | undefined }) {
 export function planFor(kit: Kit, call: InspectedCall, columns: number, ui: PaneUi = CLOSED, act?: Act, options: ViewOptions = {}): Plan {
   const isPending = call.status === 'pending'
   const config = options.links ?? configOf()
-  const status = statusOf(call.status, options.waiting ?? 0, call.outcome)
-  return planOf(call.ir, {
+  const status = callStatusOf(call, options.waiting ?? 0)
+  const profile = profileOf(call)
+  const headline = call.ir.summary === undefined ? headlineOf(call) : undefined
+  const subject = subjectOf(call)
+  const isSchema = call.tool === 'search' || call.tool === 'introspect'
+  const plan = planOf(isSchema ? { ...call.ir, roots: [] } : call.ir, {
+    profile,
+    ...(headline !== undefined && { headline }),
+    ...(subject !== undefined && { subject }),
+    ...(call.tool !== undefined && { badge: badgeOf(call).word, notes: lookupNotes(call) }),
+    callStatus: call.status,
     status: status === undefined ? '' : `${status.glyph === '' ? '' : `${status.glyph} `}${status.word}`,
     ...(options.nav !== undefined && { nav: options.nav }),
     rows: options.bodyRows ?? Infinity,
@@ -728,7 +739,7 @@ export function planFor(kit: Kit, call: InspectedCall, columns: number, ui: Pane
     open: ui,
     now: call.arrivedAt,
     sectionGap: sectionGapOf(options),
-    links: linksOf(call.ir, config),
+    links: profile.isLookup ? [] : linksOf(call.ir, config),
     linkConfig: config,
     hasLinkElement: kit.Link !== undefined,
     hasControls: isInteractiveOf(kit, call, act),
@@ -741,6 +752,23 @@ export function planFor(kit: Kit, call: InspectedCall, columns: number, ui: Pane
     // RESULT only for a call that ran: a refusal or a tool error carries no GraphQL response.
     ...(call.outcome !== undefined && call.status === 'ran' && { outcome: call.outcome }),
   })
+  const width = Math.max(1, columns - RIGHT_PAD)
+  const lookup = lookupBody(call, ui, width, plan.total)
+  const selected = ui.detail?.callId === call.id && ui.detail.detailId !== 'lookup:all' ? detailPage(call, ui.detail.detailId) : undefined
+  const inlineLookup = isSchema && selected !== undefined && selected.baseId !== 'all'
+  const hasControl = isInteractiveOf(kit, call, act) && call.ir.state !== 'unparseable' && call.ir.opType !== undefined
+  const details = selected === undefined || inlineLookup ? undefined : { title: selected.title, baseId: selected.baseId, page: selected.page, pages: selected.pages, lines: selected.lines.flatMap(line => wrapLines(line, width)), rows: wrapLines(selected.title, width).length + selected.lines.reduce((sum, line) => sum + wrapLines(line, width).length, 0) + (selected.pages > 1 ? 1 : 0) + (selected.page > 0 ? 1 : 0) + (selected.page + 1 < selected.pages ? 1 : 0) }
+  const supplemental = (lookup?.rows ?? 0) + (hasControl ? 1 : 0) + (details?.rows ?? 0)
+  const total = plan.total + (lookup?.rows ?? 0) + (hasControl ? 1 : 0) + (details?.rows ?? 0)
+  const dedicated = details?.baseId === 'checks' || details?.baseId === 'trust'
+  const anchors = new Map(plan.anchors)
+  for (const [id, anchor] of anchors) {
+    const afterHeader = dedicated && anchor.row >= plan.head.rows ? details.rows : 0
+    const beforeLinks = id.startsWith('l:') ? (lookup?.rows ?? 0) + (hasControl ? 1 : 0) + (dedicated ? 0 : details?.rows ?? 0) : 0
+    anchors.set(id, { ...anchor, row: anchor.row + afterHeader + beforeLinks })
+  }
+  for (const [id, anchor] of lookup?.anchors ?? []) anchors.set(id, anchor)
+  return { ...plan, total, fits: total <= plan.rows, anchors, ...(lookup !== undefined && { lookup }), ...(details !== undefined && { details }) }
 }
 
 /** Presses can arrive: the call has settled, the host passed `act`, and the kit has Buttons. */
@@ -748,6 +776,57 @@ const isInteractiveOf = (kit: Kit, call: InspectedCall, act: Act | undefined) =>
 
 /** Off the terminal, sections get a row more air. */
 const sectionGapOf = (options: ViewOptions) => (options.surface !== undefined && options.surface !== 'terminal' ? 1 : 0)
+
+function Overview({ kit, call, options, act }: { kit: Kit; call: CallOverview; options: ViewOptions; act?: Act }) {
+  const { Box, Text, Button } = kit
+  return <Box flexDirection="column" paddingRight={RIGHT_PAD} backgroundColor={BACKGROUND}>
+    <Text bold wrap="wrap">{esc(call.overview.operationName ?? call.tool ?? call.overview.operationKind ?? 'Agent Services call')}</Text>
+    <Text color={QUIET}>{call.status === 'pending' ? 'Awaiting approval' : statusOf(call.status, 0)?.word ?? 'Call completed'}</Text>
+    <Text wrap="wrap">{call.overview.headlineSource === 'model' && <Text color={QUIET}>Haiku summary · </Text>}{esc(call.overview.headline)}</Text>
+    <Text color={QUIET} wrap="wrap">{`${retentionReason(call.details)} This history entry keeps its overview.`}</Text>
+    {Button !== undefined && act !== undefined ? <Box flexDirection="row" columnGap={2}>
+      {options.nav?.older !== undefined ? <Button plain hotkey="p" label="older" onPress={() => act({ selection: options.nav!.older! })} /> : null}
+      {options.nav?.newer !== undefined ? <Button plain hotkey="n" label="newer" onPress={() => act({ selection: options.nav!.newer! })} /> : null}
+      {options.nav?.isLive === false ? <Button plain label="current call" onPress={() => act({ selection: { kind: 'live' } })} /> : null}
+    </Box> : null}
+  </Box>
+}
+
+function LookupBody({ ctx, call, plan }: { ctx: Ctx; call: InspectedCall; plan: NonNullable<Plan['lookup']> }) {
+  const { Box, Text, Button } = ctx.kit
+  return <Box flexDirection="column">{plan.lines.map((line, at) => {
+    const pressable = ctx.act !== undefined && Button !== undefined && (line.detailId !== undefined || line.targetDetailId !== undefined || line.expand !== undefined)
+    const text = line.rows.join('\n')
+    const content = <Text>{line.rowParts.flatMap((parts, row) => [
+      ...(row > 0 ? ['\n'] : []),
+      ...parts.map(part => <Text color={part.tone === 'accent' ? ACCENT : part.tone === 'data' ? DATA : part.tone === 'quiet' ? QUIET : TEXT} bold={part.bold}>{part.text}</Text>),
+    ])}</Text>
+    const open = () => ctx.act?.({ detail: line.expand === 'less' || (ctx.ui.detail?.callId === call.id && ctx.ui.detail.detailId === line.detailId && line.targetDetailId === undefined) ? null : { callId: call.id, detailId: line.expand === 'more' ? 'lookup:all' : line.targetDetailId ?? line.detailId! } })
+    return pressable && Button !== undefined ? <Button key={`lookup:${at}`} plain label={text} {...(line.detailId !== undefined && { hover: idHover(line.detailId) })} onPress={open}>{content}</Button> : <Text {...(line.detailId !== undefined && { hover: idHover(line.detailId) })}>{content}</Text>
+  })}</Box>
+}
+
+/** One shared, scrollable detail body; dedicated context opens next to its header trigger. */
+function DetailsBody({ ctx, call, plan }: { ctx: Ctx; call: InspectedCall; plan: Plan }) {
+  const { Box, Text, Button } = ctx.kit
+  if (plan.details === undefined || ctx.act === undefined || Button === undefined) return null
+  return <Box flexDirection="column"><Text bold wrap="wrap">{plan.details.title}</Text>{plan.details.lines.map(line => <Text wrap="wrap">{line}</Text>)}
+    {plan.details.pages > 1 ? <Text color={QUIET}>{`Detail page ${plan.details.page + 1} of ${plan.details.pages}`}</Text> : null}
+    {plan.details.page > 0 ? <Button plain label="previous detail page" onPress={() => ctx.act?.({ detail: { callId: call.id, detailId: `${plan.details!.baseId}@page:${plan.details!.page - 1}` } })} /> : null}
+    {plan.details.page + 1 < plan.details.pages ? <Button plain label="next detail page" onPress={() => ctx.act?.({ detail: { callId: call.id, detailId: `${plan.details!.baseId}@page:${plan.details!.page + 1}` } })} /> : null}
+  </Box>
+}
+
+function CompleteDetails({ ctx, call, plan }: { ctx: Ctx; call: InspectedCall; plan: Plan }) {
+  const { Box, Button } = ctx.kit
+  if (ctx.act === undefined || Button === undefined) return null
+  const expanded = ctx.ui.detail?.callId === call.id
+  const dedicated = plan.details?.baseId === 'checks' || plan.details?.baseId === 'trust'
+  return <Box flexDirection="column">
+    <Button key="details" plain hotkey="d" label={expanded ? 'close details' : 'details'} onPress={() => ctx.act?.({ detail: expanded ? null : { callId: call.id, detailId: 'all' } })} />
+    {!dedicated && <DetailsBody ctx={ctx} call={call} plan={plan} />}
+  </Box>
+}
 
 /**
  * The pane for the call `shown` picks. `ui` is the pane's own drawer state
@@ -760,7 +839,9 @@ export function viewOf(kit: Kit, shown: Shown, columns: number, ui: PaneUi = CLO
   // Inside the built-in's blank last column, as the /diff mod's insetOf.
   const inner = Math.max(1, Math.floor(columns) - RIGHT_PAD)
 
-  if (call === null) return <Empty kit={kit} bodyRows={options.bodyRows} />
+  if (call === null) return <Box flexDirection="column" backgroundColor={BACKGROUND} minHeight={options.bodyRows}><Empty kit={kit} bodyRows={options.bodyRows} /></Box>
+
+  if (!('ir' in call)) return <Overview kit={kit} call={call} options={options} act={act} />
 
   const isPending = call.status === 'pending'
   const isInteractive = isInteractiveOf(kit, call, act)
@@ -771,27 +852,30 @@ export function viewOf(kit: Kit, shown: Shown, columns: number, ui: PaneUi = CLO
   const plan = planFor(kit, call, columns, ui, act, { ...options, waiting })
   // The rows a hover card opens into: the window when the host gives one, else the pane as drawn (a snapshot, a test).
   const view = options.bodyRows === undefined ? { top: 0, rows: plan.total } : { top: options.scrollOffset ?? 0, rows: options.bodyRows }
+  const scopedAct: Act | undefined = isInteractive && act !== undefined ? change => act({ ...change, expectedCallId: call.id }) : undefined
   const ctx: Ctx = {
     kit,
     columns: inner,
     column: plan.column,
     ui,
-    act: isInteractive ? act : undefined,
+    act: scopedAct,
     now: call.arrivedAt,
     isSettled: !isPending,
     ...(ir.opName !== undefined && { opName: ir.opName }),
     sectionGap,
-    pins: annotationIndex(ir, plan.annotations, call.status === 'ran' ? call.outcome : undefined),
+    pins: annotationIndex(ir, plan.annotations, call.tool === undefined && !isPending ? call.outcome ?? { rows: [], errors: [], authLinks: [] } : call.status === 'ran' ? call.outcome : undefined),
     cards: { anchors: plan.anchors, ...view, total: plan.total },
     callId: call.id,
     ...(options.links !== undefined && { links: options.links }),
     ...(options.surface !== undefined && { surface: options.surface }),
+    profile: profileOf(call),
+    ...(call.tool !== undefined && { tool: call.tool }),
   }
 
   return (
-    <Box flexDirection="column" paddingRight={RIGHT_PAD}>
+    <Box flexDirection="column" paddingRight={RIGHT_PAD} backgroundColor={BACKGROUND} minHeight={options.bodyRows}>
       <Header ctx={ctx} call={call} waiting={waiting} nav={options.nav} head={plan.head} />
-      <HeaderRule ctx={ctx} opType={ir.opType} />
+      {(plan.details?.baseId === 'checks' || plan.details?.baseId === 'trust') && <DetailsBody ctx={ctx} call={call} plan={plan} />}
       {ir.state === 'unparseable' || ir.opType === undefined ? (
         <Unparseable ctx={ctx} call={call} />
       ) : (
@@ -804,11 +888,12 @@ export function viewOf(kit: Kit, shown: Shown, columns: number, ui: PaneUi = CLO
           <Changes ctx={ctx} plan={plan.changes} gap={plan.gap} />
           <Result ctx={ctx} plan={plan.result} gap={plan.gap} />
           <Notes ctx={ctx} plan={plan.notes} gap={plan.gap} />
-          <Box flexDirection="column" rowGap={plan.gap} marginTop={plan.gap}>
+          {plan.lookup !== undefined ? <LookupBody ctx={ctx} call={call} plan={plan.lookup} /> : <Box flexDirection="column" rowGap={plan.gap} marginTop={plan.gap}>
             {ir.roots.map((root, index) => (
               <RootForm ctx={ctx} root={root} opType={ir.opType ?? 'query'} plan={plan.roots[index] as RootPlan} />
             ))}
-          </Box>
+          </Box>}
+          <CompleteDetails ctx={ctx} call={call} plan={plan} />
           <Links ctx={ctx} plan={plan.links} ir={ir} outcome={call.status === 'ran' ? call.outcome : undefined} gap={plan.gap} />
         </Box>
       )}
@@ -816,12 +901,14 @@ export function viewOf(kit: Kit, shown: Shown, columns: number, ui: PaneUi = CLO
       {ir.state !== 'unparseable' &&
         ir.opType !== undefined && [
           ...headerCards(ctx, call, waiting),
+          ...(call.found?.members ?? []).map((member, at) => <Frame ctx={ctx} id={`member:${at}`} title={esc(member)}><CompactFacts ctx={ctx} lines={detailOf(call, `member:${at}`)?.lines ?? []} /></Frame>),
           ...detailCards(ctx, ir, call.status === 'ran' ? call.outcome : undefined),
           ...resultCards(ctx, plan.result, ir, call.status === 'ran' ? call.outcome : undefined),
           ...toggleCards(ctx, plan.result),
           ...changeCards(ctx, plan.changes),
           <ConfirmCard ctx={ctx} outcome={call.status === 'ran' ? call.outcome : undefined} />,
           <FlagsCard ctx={ctx} plan={plan.flags} />,
+          ...noteCards(ctx, plan.notes),
           <TrustCard ctx={ctx} plan={plan.trust} />,
           <AgentCard ctx={ctx} plan={plan.agent} />,
           ...linkCards(ctx, plan.links, ir, call.status === 'ran' ? call.outcome : undefined),

@@ -172,7 +172,7 @@ test('different servers discover their own scopes and schema', async () => {
         ? { bundleDigest: 'other', scopes: ['slack'] }
         : { bundleDigest: 'other', results: [{ operationName: 'slack_read', types: ['type Query { slack_read: Int }'] }] })
     }
-    return mcp(tool === 'validate' ? { bundleDigest: 'other', valid: true } : { bundleDigest: 'other', results: [{ fields: [{ path: 'slack_read', decision: 'allow' }] }] })
+    return mcp(tool === 'validate' ? { bundleDigest: 'other', valid: true } : { bundleDigest: 'other', results: [{ denyOperation: false, fields: [{ path: 'slack_read', decision: 'allow' }] }] })
   }
   const op = '{ slack_read }'
   const second = await enrich(call, cacheForServer(caches, 'second'), build(op, {}), op)
@@ -188,7 +188,7 @@ test('a bundle change refetches a cached signature before reporting ready', asyn
     if (tool === 'search') return mcp((args.terms as string[]).length === 0
       ? { bundleDigest: digest, scopes: ['jira'] }
       : { bundleDigest: digest, results: [{ operationName: 'jira_read', types: [`type Query { jira_read: ${digest === 'old' ? 'String' : 'Int'} }`] }] })
-    return mcp(tool === 'validate' ? { bundleDigest: digest, valid: true } : { bundleDigest: digest, results: [{ fields: [{ path: 'jira_read', decision: 'allow' }] }] })
+    return mcp(tool === 'validate' ? { bundleDigest: digest, valid: true } : { bundleDigest: digest, results: [{ denyOperation: false, fields: [{ path: 'jira_read', decision: 'allow' }] }] })
   }
   const cache = emptyCache()
   const op = '{ jira_read }'
@@ -218,7 +218,7 @@ test('a repeatedly changing bundle stops after one retry and leaves facts unknow
   let scopeReads = 0
   const call: CallGas = async (tool, args) => {
     if (tool === 'search' && (args.terms as string[]).length === 0) scopeReads++
-    return mcp({ bundleDigest: `d${++digest}`, scopes: ['confluence'], valid: true, results: [{ fields: [{ path: 'confluence_search', decision: 'allow' }] }] })
+    return mcp({ bundleDigest: `d${++digest}`, scopes: ['confluence'], valid: true, results: [{ denyOperation: false, fields: [{ path: 'confluence_search', decision: 'allow' }] }] })
   }
   const ir = await enrich(call, emptyCache(), build(), OP)
   assert.equal(scopeReads, 2)
@@ -274,7 +274,7 @@ test('a late policy answer cannot replace the current bundle policy', async () =
   let requested!: () => void
   const started = new Promise<void>(resolve => requested = resolve)
   const current: CallGas = async (tool, args) => {
-    if (tool === 'dry_run') return mcp({ bundleDigest: 'new', results: [{ fields: [{ path: 'confluence_search', decision: 'deny' }] }] })
+    if (tool === 'dry_run') return mcp({ bundleDigest: 'new', results: [{ denyOperation: false, fields: [{ path: 'confluence_search', decision: 'deny' }] }] })
     return withDigest(await fixture.call(tool, args), 'new')
   }
   let first = true
@@ -409,7 +409,8 @@ test('roots across services are each checked against their own scope, in one IR'
   assert.equal(find(ir.roots, 'open.issues.key')!.policy, 'allow')
   assert.equal(ir.roots.map(root => root.schema?.type).join(), 'Jira_Results,[IncidentIO_Incident],[Acme_Member]')
   assert.deepEqual(ir.roots.map(root => root.service), ['jira', 'incidentio', 'acme-customer-data'])
-  assert.deepEqual(ir.checks, { policy: 'ok', validation: 'ok', schema: 'ok' })
+  assert.deepEqual([ir.checks?.policy, ir.checks?.validation, ir.checks?.schema], ['ok', 'ok', 'ok'])
+  assert.equal(ir.checks?.context?.length, 9)
   assert.equal(ir.validation?.valid, true)
   // The type condition equal to the parent type names nothing: dropped now the schema is known.
   assert.equal(find(ir.roots, 'incidents.ref')!.onType, undefined)

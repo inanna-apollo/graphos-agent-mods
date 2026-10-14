@@ -14,13 +14,13 @@ export const isMeterShown = (counts: { mask: number; deny: number }) => counts.m
  * the count alone, `3 allowed`.
  */
 export function allowedText(counts: { allow: number; unknown?: number }, isAll = true): string {
-  return isAll && (counts.unknown ?? 0) === 0 && counts.allow > 1 ? `all ${counts.allow} allowed` : `${counts.allow} allowed`
+  return isAll && (counts.unknown ?? 0) === 0 && counts.allow > 1 ? `all ${counts.allow} selected fields allowed` : `${counts.allow} selected ${counts.allow === 1 ? 'field' : 'fields'} allowed`
 }
 
 /** The policy row's words in the meter's place as drawn (ui/index.tsx AllAllowed): `✓ all 9 allowed`, `✓ 9` where the row is short of room, or `3 allowed`. */
 export function allowedShown(counts: { allow: number; unknown?: number }, isAll = true, isLong = true): string {
   const isChecked = isAll && (counts.unknown ?? 0) === 0
-  return isChecked ? `${GLYPH.allow} ${isLong ? allowedText(counts, isAll) : counts.allow}` : allowedText(counts, isAll)
+  return isChecked ? `${GLYPH.allow} ${isLong ? allowedText(counts, isAll) : `${counts.allow} fields allowed`}` : allowedText(counts, isAll)
 }
 
 /** A write Agent Services allows, in the meter's place (src/view/outcome.ts isWriteAllowed): `✓ write allowed`, `✓ allowed` where the row is short of room. */

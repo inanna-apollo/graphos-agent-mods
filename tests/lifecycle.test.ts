@@ -35,10 +35,11 @@ type Hold = (tool: string, args: string) => Promise<void> | undefined
  * answers at once unless `hold` returns a wait for it. Records each Agent Services
  * tool call as `tool args`.
  */
-function gas(on: On, hold: Hold = () => undefined) {
+function gas(on: On, hold: Hold = () => undefined, options: { isAsking?: boolean } = {}) {
   const calls: string[] = []
   on('tool.list', () => ({ value: GAS_TOOLS }))
-  on('tool.check', () => ({ decision: 'allow' as const }))
+  // The mod's own lookups are allowed; with isAsking, a call's own check (under its id) asks.
+  on('tool.check', (_, e) => ({ decision: options.isAsking === true && e.tool_use_id !== undefined ? ('ask' as const) : ('allow' as const) }))
   on('mcp.call', async (_, e) => {
     const args = JSON.stringify(e.args)
     calls.push(`${e.tool} ${args}`)
@@ -64,10 +65,10 @@ function session(on: On) {
  * a worker boundary and the summary's cache key is a real digest, so neither
  * keeps pace with the mocked clock under load.
  */
-async function until(clock: MockClock, isDone: () => boolean, ms: number) {
-  for (let passed = 0; passed < ms && !isDone(); passed += 100) {
+async function until(clock: MockClock, isDone: () => boolean | Promise<boolean>, ms: number) {
+  for (let passed = 0; passed < ms && !await isDone(); passed += 100) {
     await clock.advance(100)
-    if (!isDone()) await pause(5)
+    if (!await isDone()) await pause(5)
   }
 }
 
@@ -126,22 +127,26 @@ test('an Agent Services check that never answers ends the call’s analysis in 2
   expect(await shown.find({ type: 'Client', key: 'shimmer' })).toBeDefined()
   await clock.advance(20_000)
   // Still pending at its prompt, the first call is no longer analysing: its policy is unknown and the pane says why.
-  expect(await shown.find({ type: 'Client', key: 'shimmer' })).toBeUndefined()
-  expect(await shown.find({ text: /policy (and schema )?not checked/ })).toBeDefined()
-  expect(await shown.find({ text: /no answer from Agent Services/ })).toBeDefined()
-
-  release()
-  await first
+  try {
+    expect({
+      shimmer: await shown.find({ type: 'Client', key: 'shimmer' }) !== undefined,
+      unknownAccess: await shown.find({ text: /access evidence unavailable/ }) !== undefined,
+      timeoutEvidence: await shown.find({ text: /inspection exceeded its time limit/ }) !== undefined,
+    }).toEqual({ shimmer: false, unknownAccess: true, timeoutEvidence: true })
+  } finally {
+    release()
+    await first
+  }
 })
 
 test('a call whose analysis throws settles once and is never retried', async ($, on) => {
   const clock = mock.clock(on)
   const world = gas(on)
   on('model.complete', () => answered('{"headline":"Reads pages"}'))
-  // The write that would land the checks' answers is refused once: the pipeline throws past enrich.
+  // The write that would land the headline is refused once: the pipeline must still settle.
   let refused = 0
   on('state.set', (_, e, next) => {
-    if (refused === 0 && e.key === 'calls' && JSON.stringify(e.value).includes('"state":"ready"')) {
+    if (refused === 0 && e.key === 'calls' && JSON.stringify(e.value).includes('Reads pages')) {
       refused += 1
       return { deny: 'refused by the test' }
     }
@@ -158,7 +163,7 @@ test('a call whose analysis throws settles once and is never retried', async ($,
 
   const shown = await pane($)
   expect(await shown.find({ type: 'Client', key: 'shimmer' })).toBeUndefined()
-  expect(await shown.find({ text: /policy (and schema )?not checked/ })).toBeDefined()
+  expect(await shown.find({ text: /confluence_search/ })).toBeDefined()
   expect(await shown.findAll({ type: 'Client' })).toHaveLength(0)
 })
 
@@ -192,7 +197,8 @@ for (const failure of ['throws', 'answers garbage', 'never answers'] as const) {
 
 test('a call reaches its dialog without waiting on the pane, the link files or the raw pane', async ($, on) => {
   const clock = mock.clock(on)
-  gas(on)
+  // The person's rules ask: the pane opens for the dialog.
+  gas(on, undefined, { isAsking: true })
   on('model.complete', () => answered('{"headline":"Reads pages"}'))
   // Every slow host call the mod makes around an arrival is held for 3 s.
   on('process.run', async () => {
@@ -209,18 +215,22 @@ test('a call reaches its dialog without waiting on the pane, the link files or t
     opened.push(e.id)
     return { value: { isPlaced: true as const } }
   })
-  let isReached = false
-  on('tool.call', { tool: EXECUTE }, () => {
-    isReached = true
+  let reachedId: string | undefined
+  on('tool.call', { tool: EXECUTE }, (_, e) => {
+    reachedId = e.tool_use_id
     return ran()
   })
 
   const running = $.tool.call({ tool: EXECUTE, operation: FIRST, variables: VARIABLES })
   await clock.settle()
-  expect(isReached).toBe(true)
+  expect(reachedId).toBeDefined()
+  // The engine's check under the call's id, as it asks before its dialog.
+  const checking = $.tool.check({ tool: EXECUTE, input: { operation: FIRST, variables: VARIABLES }, tool_use_id: reachedId })
 
   await clock.advance(10_000)
   await running
+  await checking
+  await clock.advance(5_000)
   // The pane still opened on its own, beside the dialog.
   expect(opened).toContain('gas')
 })
@@ -231,19 +241,33 @@ test('an idle session never polls, and the pump stops once each call’s analysi
   on('model.complete', () => answered('{"headline":"Reads pages"}'))
   on('tool.call', { tool: EXECUTE }, ran)
   let reads = 0
+  let firstAnalysisFinished = false
+  on('state.set', { key: 'callDetails' }, async (_, e, next) => {
+    const result = await next(e)
+    if (result.value?.isSet && e.value?.json) {
+      const call = JSON.parse(e.value.json)
+      if (call.ir?.opName === 'First' && call.ir.summary !== undefined && call.ir.isSummarizing !== true) firstAnalysisFinished = true
+    }
+    return result
+  })
   on('state.get', (_, e, next) => {
     if (e.key === 'calls') reads += 1
     return next(e)
   })
   await session(on)($)
 
-  // One look at session.start for anything a reload left analysing, then nothing.
-  await until(clock, () => false, 5_000)
-  expect(reads).toBeLessThanOrEqual(2)
+  // Session migration reads once; an idle clock performs no further work.
+  await until(clock, () => false, 1_000)
+  const idle = reads
+  await until(clock, () => false, 4_000)
+  expect(reads).toBe(idle)
 
   await $.tool.call({ tool: EXECUTE, operation: FIRST, variables: VARIABLES })
-  await until(clock, () => world.of('dry_run', 'confluence_search').length > 0, 5_000)
-  await until(clock, () => false, 2_000)
+  await until(clock, () => firstAnalysisFinished, 10_000)
+  expect(firstAnalysisFinished).toBe(true)
+  // Readiness is observed before the quiet interval; merely starting dry_run
+  // does not mean schema, summary and verdict persistence have finished.
+  await until(clock, () => false, 1_000)
   const settled = reads
   await until(clock, () => false, 5_000)
   expect(reads - settled).toBe(0)
@@ -353,5 +377,6 @@ test('the end of a session settles what is still pending, so a /clear starts on 
   await until(clock, () => false, 1_000)
   await $.session.end({ reason: 'clear', sessionId: 's', resume: { id: 's' } } as Parameters<Engine['session']['end']>[0])
   const shown = await pane($)
+  await until(clock, async () => await shown.find({ text: /^interrupted$/ }) !== undefined, 2_000)
   expect(await shown.find({ text: /^interrupted$/ })).toBeDefined()
 })

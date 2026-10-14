@@ -182,7 +182,7 @@ test('a saved trust.graphql is only reported: it is not read, a rule written int
   expect(seen.reads.filter(path => path === TRUST_FILE)).toHaveLength(readsBefore)
   expect(seen.logs.join('\n')).toMatch(/trust\.graphql changed/)
   expect(seen.logs.join('\n')).toMatch(/\/gas trust/)
-  expect(seen.statuses.filter(line => line !== undefined).at(-1)).toMatch(/run \/gas trust to reload/)
+  expect(seen.statuses.filter(line => line !== undefined)).toEqual([])
   // Still asking: the widened rule is not loaded.
   expect((await verdictOf($, clock, OUTSIDE)).decision).toBe('ask')
 
@@ -190,7 +190,7 @@ test('a saved trust.graphql is only reported: it is not read, a rule written int
   await command($, 'trust')
   await settle(clock)
   expect((await verdictOf($, clock, OUTSIDE)).decision).toBe('allow')
-  expect(seen.statuses.filter(line => line !== undefined).at(-1)).not.toMatch(/run \/gas trust to reload/)
+  expect(seen.statuses.filter(line => line !== undefined)).toEqual([])
 })
 
 test('a module reloaded mid-session, which never read the rules, does not read the trust file on a save either', async ($, on) => {
@@ -201,7 +201,7 @@ test('a module reloaded mid-session, which never read the rules, does not read t
   await settle(clock)
   expect(seen.reads.filter(path => path === TRUST_FILE)).toHaveLength(0)
   expect(seen.logs.join('\n')).toMatch(/trust\.graphql changed/)
-  expect(seen.statuses.filter(line => line !== undefined).at(-1)).toMatch(/run \/gas trust to reload/)
+  expect(seen.statuses.filter(line => line !== undefined)).toEqual([])
 })
 
 test('saving the trust file twice before applying it says so once in the transcript', async ($, on) => {

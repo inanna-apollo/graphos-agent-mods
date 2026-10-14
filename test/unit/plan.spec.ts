@@ -7,9 +7,8 @@ import { accessOf } from '../../src/gas.ts'
 import type { CallIR } from '../../src/ir.ts'
 import { normalize } from '../../src/normalize.ts'
 import { indexSdl } from '../../src/schema.ts'
-import { annotationIndex } from '../../src/view/annotations.ts'
 import { CLOSED } from '../../src/view/kit.ts'
-import { cellWidth, isNeverShed, moreLabel, nameRows, planOf, returnLines, shedOrder, textRows } from '../../src/view/plan.ts'
+import { cardId, cellWidth, moreLabel, nameRows, planOf, returnLines } from '../../src/view/plan.ts'
 import type { Plan, PlanOptions } from '../../src/view/plan.ts'
 
 // ---- Fixtures, built as the pipeline builds them
@@ -135,27 +134,15 @@ const FIXTURES = { confluence, jira } as const
 
 // ---- Invariants
 
-function assertNeverShed(ir: CallIR, plan: Plan) {
+function assertRequiredContent(ir: CallIR, plan: Plan) {
   assert.ok(plan.header >= 1 && plan.header <= 2, 'the header is a row, and a second for the policy')
-  assert.equal(plan.rule, 1)
+  assert.equal(plan.rule, 0)
   assert.ok(plan.summary.lines >= 1, 'the summary keeps its first line')
-  assert.equal(plan.roots.length, ir.roots.length, 'every root is drawn')
+  assert.deepEqual(plan.roots.map(root => root.path), ir.roots.map(root => root.path), 'every root is drawn in selection order')
   for (const root of plan.roots) assert.ok(root.rootRows >= 1, `root ${root.path} keeps its name`)
-  const shown = new Set(plan.notes.shown.map(note => note.index))
-  plan.notes.all.forEach((note, index) => {
-    if (isNeverShed(note)) assert.ok(shown.has(index), `never-shed note kept: ${note.text}`)
-  })
 }
 
-function assertOrdered(plan: Plan) {
-  const order = shedOrder(plan.result.lines.length > 0)
-  const ranks = plan.shed.map(kind => order.indexOf(kind))
-  for (let i = 1; i < ranks.length; i += 1) {
-    assert.ok((ranks[i] ?? 0) >= (ranks[i - 1] ?? 0), `shed out of order: ${plan.shed.join(', ')}`)
-  }
-}
-
-function assertCounts(ir: CallIR, plan: Plan) {
+function assertCounts(plan: Plan) {
   const notes = plan.notes.all
   assert.equal(plan.notes.more, notes.length - plan.notes.shown.length, 'notes +N more')
   const last = plan.notes.shown.at(-1)
@@ -164,13 +151,9 @@ function assertCounts(ir: CallIR, plan: Plan) {
     const names = notes[shown.index]?.names?.length ?? 0
     assert.ok(shown.names <= names, 'never lists more names than there are')
   }
-  plan.roots.forEach((root, r) => {
-    const field = ir.roots[r]!
+  plan.roots.forEach(root => {
     for (const arg of root.args) assert.equal(arg.more, arg.lines - arg.maxLines, `${arg.name}: … N more lines`)
     assert.equal(root.access.more, root.access.scopes.length - root.access.needs, 'ACCESS +N')
-    const pins = annotationIndex(ir, plan.annotations)
-    const all = returnLines(field, root.returns.isCollapsed, Infinity, one => pins.field(one.coordinate))
-    assert.equal(root.returns.more, all.length - root.returns.lines.length, 'RETURNS … N more')
   })
 }
 
@@ -179,11 +162,10 @@ for (const [name, fixture] of Object.entries(FIXTURES)) {
   const floor = planOf(ir, options(0)).total
 
   for (const rows of ROWS) {
-    test(`${name} at ${rows} rows: never-shed items stay, shedding is ordered, counts are right`, () => {
+    test(`${name} at ${rows} rows: roots and headline stay, counts are right`, () => {
       const plan = planOf(ir, options(rows))
-      assertNeverShed(ir, plan)
-      assertOrdered(plan)
-      assertCounts(ir, plan)
+      assertRequiredContent(ir, plan)
+      assertCounts(plan)
       // Fits whenever the fully shed pane does.
       assert.ok(plan.total <= Math.max(rows, floor), `${plan.total} rows planned for ${rows} (floor ${floor})`)
       if (floor <= rows) assert.ok(plan.fits)
@@ -207,16 +189,46 @@ test('confluence: a tall pane sheds nothing and shows everything', () => {
   assert.equal(plan.summary.hasCredit, true)
   assert.equal(plan.roots[0]!.returns.isCollapsed, false)
   assert.equal(plan.roots[0]!.access.needs, 2)
-  assert.equal(plan.summary.rows, plan.summary.lines + 3, 'the box counts its two border rows and the eyebrow above it')
+  assert.equal(plan.summary.rows, plan.summary.lines + 2, 'the frame counts two border rows with inline credit')
 })
 
-test('confluence: what only fills room goes first, then the rest of the ladder', () => {
+test('confluence: optional detail goes first while model attribution survives pressure', () => {
   const ir = confluence()
   const tall = planOf(ir, options(Infinity))
-  // What only fills spare room (descriptions, hints, defaults, paging, preview) goes before the credit.
+  // Spare-room detail may go; attribution stays attached to model prose.
   const FILL = ['root-description', 'arg-hints', 'result-preview', 'default-args', 'paging-line']
   const one = planOf(ir, options(tall.total - 1))
   assert.ok(one.shed.length > 0 && one.shed.every(kind => FILL.includes(kind)), one.shed.join(', '))
+  for (const rows of [tall.total, tall.total - 1, 10, 1]) {
+    const plan = planOf(ir, options(rows))
+    assert.ok(plan.summary.lines > 0, 'model prose remains visible')
+    assert.equal(plan.summary.hasCredit, true, 'visible model prose retains attribution')
+  }
+})
+
+test('failure and denial evidence survives even when the pane cannot fit its required content', () => {
+  const notes = [{ glyph: '!', text: 'schema check failed' }, { glyph: '✕', text: 'private field denied' }]
+  for (const rows of [Infinity, 20, 10, 1]) {
+    const plan = planOf(confluence(), options(rows, { notes }))
+    const shown = plan.notes.shown.map(one => plan.notes.all[one.index]!.text)
+    for (const note of notes) assert.ok(shown.includes(note.text), `${rows} rows: ${note.text}`)
+  }
+})
+
+test('return lines account for every selected object when detail is shed', () => {
+  const objects = Array.from({ length: 10 }, (_, index) => `object${index}`)
+  const ir = buildIR('returns', normalize(`{ things { ${objects.map(name => `${name} { id }`).join(' ')} } }`, {}))
+  const full = planOf(ir, options(Infinity)).roots[0]!.returns
+  assert.deepEqual(full.lines.map(line => line.head?.name), objects)
+  for (const line of full.lines) assert.deepEqual(line.fields.map(field => field.name), ['id'])
+  assert.equal(full.more, 0)
+  const cramped = planOf(ir, options(1)).roots[0]!.returns
+  assert.ok(cramped.more > 0, 'the fixture actually sheds return detail')
+  for (const rows of [40, 25, 10, 1]) {
+    const returns = planOf(ir, options(rows)).roots[0]!.returns
+    assert.equal(returns.lines.length + returns.more, objects.length)
+    assert.deepEqual(returns.lines.map(line => line.head?.name), objects.slice(0, returns.lines.length))
+  }
 })
 
 const OUTCOME = {
@@ -235,8 +247,12 @@ test('a settled call gets RESULT, and keeps all of it however short the pane: th
   assert.equal(pending.result.rows, 0, 'no RESULT while the call waits')
 })
 
-test('jira at 25 rows: ACCESS shows one scope and +N; the JQL is cut to three lines', () => {
-  const plan = planOf(jira(), options(25))
+test('jira: shedding argument detail retains one ACCESS scope and three JQL lines', () => {
+  const ir = jira()
+  const tall = planOf(ir, options(Infinity))
+  const plan = Array.from({ length: tall.total + 1 }, (_, rows) => planOf(ir, options(rows)))
+    .find(one => one.shed.includes('arg-lines') && !one.shed.includes('arg-first-line'))
+  assert.ok(plan, 'there is a height where argument detail is reduced before its first line goes')
   const search = plan.roots[0]!
   assert.ok(plan.shed.includes('access-needs'))
   // Roots on one service share one ACCESS, drawn after the last root with the union of scopes.
@@ -249,7 +265,7 @@ test('jira at 25 rows: ACCESS shows one scope and +N; the JQL is cut to three li
   assert.equal(new Set(last.access.scopes).size, last.access.scopes.length, 'de-duplicated')
   const jql = search.args.find(arg => arg.name === 'jql')!
   assert.ok(jql.lines > 3)
-  assert.equal(jql.maxLines <= 3, true)
+  assert.equal(jql.maxLines, 3)
   assert.equal(jql.more, jql.lines - jql.maxLines)
 })
 
@@ -354,13 +370,13 @@ test('the headline keeps all its lines at every height; only its credit may drop
   for (const make of [confluence, jira]) {
     const ir = make()
     const full = planOf(ir, options(Infinity)).summary
-    assert.ok(full.lines > 2, 'a long headline wraps to several lines')
+    assert.ok(full.lines > 1, 'a long headline wraps rather than being cut')
     for (const rows of [30, 20, 15, 10, 6, 1]) {
       const plan = planOf(ir, options(rows))
       assert.equal(plan.summary.lines, full.lines, `${rows} rows`)
       assert.ok(!plan.shed.includes('summary-lines' as never) && !plan.shed.includes('summary-first-line' as never))
       // The eyebrow row is the only part that may go.
-      assert.equal(plan.summary.rows, plan.summary.lines + 2 + (plan.summary.hasCredit ? 1 : 0))
+      assert.equal(plan.summary.rows, plan.summary.lines + (plan.summary.isFramed ? 2 : plan.summary.hasCredit ? 1 : 0))
     }
   }
 })
@@ -375,11 +391,11 @@ test('the headline slot is never empty: with no schema, summary or limit it is t
   assert.match(fallbackLine(limited), /^slack_searchMessages · asks for 4$/)
 })
 
-test('a pending call with no summary and no limit still plans a headline row, at every height', () => {
+test('an execute form does not duplicate its operation name while a headline is unavailable', () => {
   const ir = buildIR('t', normalize('{ slack_searchMessages(query: "a") { messages { total } } }', {}))
-  for (const rows of [40, 15, 6, 1]) assert.ok(planOf(ir, options(rows)).summary.lines >= 1, `${rows} rows`)
+  for (const rows of [40, 15, 6, 1]) assert.equal(planOf(ir, options(rows)).summary.lines, 0, `${rows} rows`)
   const reading = { ...ir, isSummarizing: true }
-  for (const rows of [40, 6, 1]) assert.ok(planOf(reading, options(rows)).summary.lines >= 1, `${rows} rows, summarizing`)
+  for (const rows of [40, 6, 1]) assert.equal(planOf(reading, options(rows)).summary.lines, 0, `${rows} rows, summarizing`)
 })
 
 test('a collapsed object draws its fields inline when they fit, and folds only when they do not', () => {
@@ -413,4 +429,17 @@ test('the count under a long list is grouped as the list count is: `… 9,995 mo
   assert.equal(moreLabel({ more: 9995 }), '… 9,995 more')
   assert.equal(moreLabel({ more: 9995, expand: 'less' }), '… 9,995 more · show fewer')
   assert.equal(moreLabel({ more: 3 }), '… 3 more')
+})
+
+
+test('summary credit shares the bottom border and narrow panes fall back to prose', () => {
+  const ir = confluence()
+  const framed = planOf(ir, options(Infinity, { columns: 64 }))
+  assert.equal(framed.summary.isFramed, true)
+  assert.equal(framed.summary.rows, framed.summary.lines + 2)
+  assert.equal(framed.anchors.get(cardId.credit())?.row, framed.header + framed.summary.rows - 1)
+  const narrow = planOf(ir, options(Infinity, { columns: 12 }))
+  assert.equal(narrow.summary.isFramed, false)
+  assert.equal(narrow.summary.rows, narrow.summary.lines + 1)
+  assert.equal(narrow.anchors.get(cardId.credit())?.row, narrow.header)
 })

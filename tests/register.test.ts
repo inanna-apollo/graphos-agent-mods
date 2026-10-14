@@ -1,5 +1,7 @@
 import type { On } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
+import type { MockClock } from 'claude-code/testing'
+import type { StoredInspectorCalls } from '../types'
 
 const SERVER = 'claude_ai_GraphOS_Agent_Services'
 const EXECUTE = `mcp__${SERVER}__execute`
@@ -26,20 +28,49 @@ const PANE_PROPS = {
   view: {},
 }
 
+async function until(clock: MockClock, condition: () => boolean | Promise<boolean>) {
+  for (let step = 0; step < 200; step++) {
+    if (await condition()) return
+    await clock.advance(10)
+  }
+  expect(await condition()).toBe(true)
+}
+
+function storedCalls(on: On) {
+  let saved: StoredInspectorCalls | undefined
+  on('state.set', { key: 'calls' }, async (_, e, next) => {
+    const result = await next(e)
+    if (result.value?.isSet) saved = e.value as StoredInspectorCalls
+    return result
+  })
+  return () => saved
+}
+
+/** Read the visible drawing; hidden hover explanations are not lifecycle status. */
+function visibleText(node: unknown): string {
+  if (typeof node === 'string') return node
+  if (node === null || typeof node !== 'object') return ''
+  if (Array.isArray(node)) return node.map(visibleText).join('')
+  const element = node as { type?: string; props?: { display?: string; label?: string }; children?: unknown[] }
+  if (element.props?.display === 'none') return ''
+  if (element.type === 'Button') return element.props?.label ?? ''
+  return (element.children ?? []).map(visibleText).join('')
+}
+
 /** An Agent Services server beneath the plugin whose execute waits until released. */
 function heldExecute(on: On) {
   let release!: () => void
   let reached!: () => void
   const isReleased = new Promise<void>(resolve => (release = resolve))
   const isReached = new Promise<void>(resolve => (reached = resolve))
-  mock.clock(on, { now: Date.UTC(2026, 9, 5) })
+  const clock = mock.clock(on, { now: Date.UTC(2026, 9, 5) })
   on('tool.list', () => ({ value: GAS_TOOLS }))
   on('tool.call', { tool: EXECUTE }, async () => {
     reached()
     await isReleased
     return { result: { content: [{ type: 'text', text: '{"data":{}}' }], isError: false } }
   })
-  return { release, isReached }
+  return { release, isReached, clock }
 }
 
 for (const surface of ['terminal', 'desktop'] as const) {
@@ -49,11 +80,15 @@ for (const surface of ['terminal', 'desktop'] as const) {
     await gas.isReached
 
     const pane = await $.ui.mount({ plugin: 'graphos-agent-mods', surface, component: 'Pane', requestId: 'gas', props: PANE_PROPS })
-    expect(await pane.find({ text: /awaiting|approval/ })).toBeUndefined()
-    expect(await pane.find({ text: /confluence_search/ })).toBeDefined()
-
-    gas.release()
-    await running
+    try {
+      await until(gas.clock, async () => (await pane.find({ text: /confluence_search/ })) !== undefined)
+      expect(visibleText(await pane.drawn())).not.toMatch(/awaiting approval|approval required/)
+      expect(await pane.find({ text: /confluence_search/ })).toBeDefined()
+    } finally {
+      gas.release()
+      await running
+    }
+    await until(gas.clock, async () => (await pane.find({ text: /^ran$/ })) !== undefined)
     expect(await pane.find({ text: /^ran$/ })).toBeDefined()
   })
 }
@@ -123,13 +158,15 @@ test('policy from dry_run reaches the pane while the call waits at its prompt', 
   await clock.advance(1_000)
 
   const pane = await $.ui.mount({ plugin: 'graphos-agent-mods', surface: 'terminal', component: 'Pane', requestId: 'gas', props: PANE_PROPS })
-  expect(await pane.find({ text: /awaiting|approval/ })).toBeUndefined()
-  expect(await pane.find({ text: /excerpt/ })).toBeDefined()
-  expect(await pane.find({ text: /masked/ })).toBeDefined()
-  expect(tools.every(tool => ['search', 'introspect', 'validate', 'dry_run'].includes(tool))).toBe(true)
-
-  release()
-  await running
+  try {
+    expect(visibleText(await pane.drawn())).not.toMatch(/awaiting approval|approval required/)
+    expect(await pane.find({ text: /excerpt/ })).toBeDefined()
+    expect(await pane.find({ text: /masked/ })).toBeDefined()
+    expect(tools.every(tool => ['search', 'introspect', 'validate', 'dry_run'].includes(tool))).toBe(true)
+  } finally {
+    release()
+    await running
+  }
 })
 
 for (const decision of ['ask', 'deny'] as const) {
@@ -192,13 +229,15 @@ test('the mod only ever calls the read-only Agent Services tools', async ($, on)
 })
 
 test('the pane shows an older settled call when the cursor points back', async ($, on) => {
-  mock.clock(on, { now: Date.UTC(2026, 9, 5) })
+  const clock = mock.clock(on, { now: Date.UTC(2026, 9, 5) })
+  const saved = storedCalls(on)
   on('tool.list', () => ({ value: GAS_TOOLS }))
   on('ui.open', () => ({ value: { isPlaced: false, reason: 'no pane host in a test' } }))
   on('command.run', () => ({ text: '' }))
   on('tool.call', { tool: EXECUTE }, () => ({ result: { content: [{ type: 'text', text: '{"data":{}}' }], isError: false } }))
   await $.tool.call({ tool: EXECUTE, operation: OPERATION, variables: VARIABLES })
   await $.tool.call({ tool: EXECUTE, operation: 'query Second { jira_issue(key: "A-1") { key } }' })
+  await until(clock, () => saved()?.history.length === 2 && saved()?.queue.length === 0)
 
   // `/gas older` writes the cursor the way the view's older button will.
   const run = { command: 'gas', args: 'older', origin: { kind: 'composer' as const }, presentation: { isFullscreen: false, columns: 80 } }
@@ -208,14 +247,17 @@ test('the pane shows an older settled call when the cursor points back', async (
   expect(await pane.find({ text: /jira_issue/ })).toBeUndefined()
 })
 
-test('r opens the raw pane with the operation, r again closes it; the main pane has no raw drawer', async ($, on) => {
+test('opening Inspector also seats Raw, preserves main focus, and raw follows history', async ($, on) => {
   const clock = mock.clock(on, { now: Date.UTC(2026, 9, 5) })
+  const saved = storedCalls(on)
   on('tool.list', () => ({ value: GAS_TOOLS }))
-  const opened:{ id: string; title?: string }[] = []
+  const opened:{ id: string; title?: string; focus?: true }[] = []
   const closed: string[] = []
   let isRawUp = false
+  let failsRaw = false
   on('ui.open', (_, e) => {
-    opened.push({ id: e.id, ...(e.title !== undefined && { title: e.title }) })
+    if (e.id === 'gas-raw' && failsRaw) throw new Error('Raw pane unavailable')
+    opened.push({ id: e.id, ...(e.title !== undefined && { title: e.title }), ...(e.focus !== undefined && { focus: e.focus }) })
     if (e.id === 'gas-raw') isRawUp = true
     return { value: { isPlaced: true } }
   })
@@ -228,21 +270,32 @@ test('r opens the raw pane with the operation, r again closes it; the main pane 
   on('command.run', () => ({ text: '' }))
   on('tool.call', { tool: EXECUTE }, () => ({ result: { content: [{ type: 'text', text: '{"data":{}}' }], isError: false } }))
   await $.tool.call({ tool: EXECUTE, operation: OPERATION, variables: VARIABLES })
+  await until(clock, () => saved()?.history[0]?.status === 'ran')
 
   const pane = await $.ui.mount({ plugin: 'graphos-agent-mods', surface: 'terminal', component: 'Pane', requestId: 'gas', props: PANE_PROPS })
   expect(await pane.find({ type: 'Code' })).toBeUndefined()
   expect(await pane.find({ text: /raw ▸|‹ older/ })).toBeUndefined()
-  await pane.press({ key: 'raw' })
-  await clock.advance(50)
-  expect(opened.some(one => one.id === 'gas-raw' && one.title === 'SearchQueryPlanPages')).toBe(true)
+  await $.command.run({ command: 'gas', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 80 } })
+  expect(await pane.find({ type: 'Button', key: 'raw' })).toBeUndefined()
+  expect(opened.some(one => one.id === 'gas-raw' && one.title === 'Raw · SearchQueryPlanPages' && one.focus === undefined)).toBe(true)
+  expect(opened.at(-1)?.id).toBe('gas')
+  expect(opened.at(-1)?.focus).toBe(true)
 
   const raw = await $.ui.mount({ plugin: 'graphos-agent-mods', surface: 'terminal', component: 'Pane', requestId: 'gas-raw', props: PANE_PROPS })
   expect(await raw.find({ type: 'Code', text: /confluence_search\(cql/ })).toBeDefined()
   expect(await raw.find({ type: 'Code', text: /query plan/ })).toBeDefined()
 
-  await pane.press({ key: 'raw' })
-  await clock.advance(50)
+  await $.tool.call({ tool: EXECUTE, operation: 'query SecondRead { confluence_search(cql: \"other\") { totalSize } }', variables: {} })
+  await until(clock, () => saved()?.history[0]?.overview.operationName === 'SecondRead')
+  await $.command.run({ command: 'gas', args: 'older', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 80 } })
+  await raw.redraw()
+  expect(await raw.find({ type: 'Code', text: /query SearchQueryPlanPages/ })).toBeDefined()
+  expect(opened.filter(one => one.id === 'gas-raw').at(-1)?.title).toBe('Raw · SearchQueryPlanPages')
+  await $.command.run({ command: 'gas', args: 'raw', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 80 } })
   expect(closed).toContain('gas-raw')
+  failsRaw = true
+  await $.command.run({ command: 'gas', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 80 } })
+  expect(opened.at(-1)?.id).toBe('gas')
 })
 
 // ---- Roots on several services: each scope is checked on its own and merged into the one pane
@@ -263,7 +316,7 @@ test('roots across services get policy per root, every service in the header, an
   const isSummaryReady = new Promise<void>(resolve => (summaryReady = resolve))
   on('state.set', { plugin: 'graphos-agent-mods', key: 'calls' }, async (_, e, next) => {
     const answer = await next(e)
-    if (answer.value?.isSet && [...e.value.queue, ...e.value.history].some(call => call.ir.summary !== undefined)) summaryReady()
+    if (answer.value?.isSet && [...e.value.queue, ...e.value.history].some(call => call.overview.headline === 'Reads Jira issues and organization members')) summaryReady()
     return answer
   })
   on('tool.list', () => ({ value: GAS_TOOLS }))
@@ -304,8 +357,12 @@ test('roots across services get policy per root, every service in the header, an
   expect(await pane.find({ text: /open: / })).toBeDefined()
   expect(await pane.find({ text: /members: / })).toBeDefined()
   expect(await pane.find({ text: /Reads Jira issues and organization members/ })).toBeDefined()
-  expect(await pane.find({ text: /masked/ })).toBeDefined()
-  expect(await pane.find({ text: /access not checked|calls span services|needs unknown/ })).toBeUndefined()
+  // A settled response is separate from its prior policy. The full retained
+  // details still expose the per-service dry_run evidence.
+  expect(visibleText(await pane.drawn())).not.toMatch(/masked|access not checked|calls span services|needs unknown/)
+  await pane.press({ key: 'details' })
+  await clock.advance(50)
+  expect(visibleText(await pane.drawn())).toMatch(/dry_run: masking reported/)
 })
 
 // ---- Snapshots (src/snapshot): a text file per distinct rendering
@@ -335,21 +392,32 @@ test('after /gas snapshots on, a settling call writes files under snapshots/', a
   })
   on('tool.list', () => ({ value: GAS_TOOLS }))
   on('ui.open', () => ({ value: { isPlaced: false, reason: 'no pane host in a test' } }))
-  on('tool.call', { tool: EXECUTE }, () => ({ result: { content: [{ type: 'text', text: '{"data":{}}' }], isError: false } }))
+  let release!: () => void
+  const held = new Promise<void>(resolve => release = resolve)
+  on('tool.call', { tool: EXECUTE }, async () => {
+    await held
+    return { result: { content: [{ type: 'text', text: '{"data":{}}' }], isError: false } }
+  })
   await $.command.run(snapshotsOn)
-  await $.tool.call({ tool: EXECUTE, operation: OPERATION, variables: VARIABLES })
-  await clock.advance(50)
+  const running = $.tool.call({ tool: EXECUTE, operation: OPERATION, variables: VARIABLES })
+  await until(clock, () => writes.some(write => /-arrive-50\.txt$/.test(write.path)))
+  release()
+  await running
+  // Snapshots deduplicate identical renderings; outcome may record the settled
+  // drawing before the concurrently requested settled-stage snapshot does.
+  await until(clock, () => writes.some(write => /-84\.txt$/.test(write.path) && /^# stage: \w+ \| status: ran/.test(write.text)))
 
   expect(writes.length).toBeGreaterThan(0)
   expect(writes.every(write => /\/snapshots\/[^/]+\/\d\d-[a-z-]+-\d+\.txt$/.test(write.path))).toBe(true)
   expect(writes.some(write => /-arrive-50\.txt$/.test(write.path))).toBe(true)
-  expect(writes.some(write => /-settled-84\.txt$/.test(write.path))).toBe(true)
+  expect(writes.some(write => /-84\.txt$/.test(write.path) && /^# stage: \w+ \| status: ran/.test(write.text))).toBe(true)
   expect(writes[0]?.text).toMatch(/^# stage: arrive \| status: pending/)
   expect(writes.some(write => /confluence_search/.test(write.text))).toBe(true)
 })
 
 test('without snapshots on, a settling call writes nothing', async ($, on) => {
   const clock = mock.clock(on, { now: Date.UTC(2026, 9, 5) })
+  const saved = storedCalls(on)
   const writes: string[] = []
   on('fs.write', (_, e) => {
     writes.push(e.path)
@@ -359,12 +427,14 @@ test('without snapshots on, a settling call writes nothing', async ($, on) => {
   on('ui.open', () => ({ value: { isPlaced: false, reason: 'no pane host in a test' } }))
   on('tool.call', { tool: EXECUTE }, () => ({ result: { content: [], isError: false } }))
   await $.tool.call({ tool: EXECUTE, operation: OPERATION, variables: VARIABLES })
+  await until(clock, () => saved()?.history[0]?.status === 'ran')
   await clock.advance(50)
   expect(writes).toEqual([])
 })
 
 test('/gas snapshot writes the shown call at the default widths, snapshots on or not', async ($, on) => {
-  mock.clock(on, { now: Date.UTC(2026, 9, 5) })
+  const clock = mock.clock(on, { now: Date.UTC(2026, 9, 5) })
+  const saved = storedCalls(on)
   const writes: string[] = []
   on('fs.write', (_, e) => {
     writes.push(e.path)
@@ -374,6 +444,7 @@ test('/gas snapshot writes the shown call at the default widths, snapshots on or
   on('ui.open', () => ({ value: { isPlaced: false, reason: 'no pane host in a test' } }))
   on('tool.call', { tool: EXECUTE }, () => ({ result: { content: [], isError: false } }))
   await $.tool.call({ tool: EXECUTE, operation: OPERATION, variables: VARIABLES })
+  await until(clock, () => saved()?.history[0]?.status === 'ran')
 
   const answer = await $.command.run(snapshotRun)
   expect(JSON.stringify(answer)).toMatch(/snapshots\//)

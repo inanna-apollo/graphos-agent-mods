@@ -4,15 +4,65 @@
 
 import { pickRenderer } from '../format/index.ts'
 import { own } from '../guards.ts'
-import type { ArgIR, CallIR, CallOutcome, FieldIR, Renderer } from '../ir.ts'
+import type { ArgIR, CallIR, CallOutcome, FieldIR, OmittedArg, Renderer } from '../ir.ts'
 import { isDestructiveName, isWriteName } from '../risk.ts'
 import { productOf } from './flags.ts'
 import { UNTYPED_JSON, esc, governedList, humanPlural, humanType, isJsonName, limitOf, walk } from './kit.ts'
 import { FIRST_PAGE, grouped, ownerOf, rootOfKey, shownScalars } from './outcome.ts'
 import type { ResultLine } from './outcome.ts'
-import { continuationArg, pagingNote } from './paging.ts'
+import { continuationArg, pagingNote, pagingRole } from './paging.ts'
 import { classifiedOf, isPersonObject, isPersonalField } from './personal.ts'
 import { GLYPH } from './ui/theme.ts'
+import { denialFor, observedDenials } from '../denials.ts'
+import type { LookupTool } from '../../types'
+
+export type FactContext = { isDeclared?: boolean; policyFacts?: boolean; tool?: LookupTool }
+const factContext = (context: boolean | FactContext): FactContext => typeof context === 'boolean' ? { isDeclared: context, policyFacts: !context } : context
+
+/** Complete locally retained facts, shared by compact hovers and scrollable details. */
+export function completeFieldFacts(field: FieldIR, outcome?: CallOutcome, context: boolean | FactContext = false, roots?: readonly FieldIR[]): string[] {
+  const { isDeclared = false, policyFacts = !isDeclared } = factContext(context)
+  const schema = field.schema
+  const place = roots === undefined ? undefined : placeOf(roots, field)
+  const role = place?.root === undefined ? undefined : pagingRole(field, place.root, place.parent)
+  const back = valuesBack(field, place?.parent, outcome)
+  return [
+    ...(schema === undefined ? [] : [`type: ${esc(schema.type, Infinity)} · ${typeSaid(schema.type, field.service, schema.isOpaque)}`]),
+    ...(!policyFacts ? [] : [`policy: ${policyLine(field, outcome, roots)}`]),
+    ...(schema?.isOpaque === true || (schema !== undefined && isJsonName(schema.type)) ? ['GraphQL JSON scalar: selected as one value, without selectable child fields. Its payload keys are supplied by the upstream service; GraphQL validation does not describe their shape.'] : []),
+    ...(role === undefined ? [] : [`paging: ${role}`]),
+    ...[...cameBack(field, outcome, roots), ...(back === undefined ? [] : [back])].map(one => `returned: ${one}`),
+    schema?.description === undefined ? (schema === undefined ? NO_SCHEMA : NO_DESCRIPTION) : esc(schema.description, Number.MAX_SAFE_INTEGER),
+    ...(field.paging === undefined ? [] : [`paging: ${pagingNote(field.paging)}`]),
+    ...(schema?.hints ?? []).map(one => `hint: ${esc(one, Infinity)}`),
+    ...(schema?.scopes ?? []).map(one => `scope: ${esc(one, Infinity)}`),
+    ...(schema?.deprecated === undefined ? [] : [`deprecated: ${esc(schema.deprecated, Infinity)}`]),
+    ...(schema?.tags ?? []).map(one => `directive: @${esc(one, Infinity)}`),
+    ...(schema?.requiresInclude === undefined ? [] : [`include: ${schema.requiresInclude.mode} with ${esc(schema.requiresInclude.value, Infinity)}`]),
+    ...field.args.flatMap(arg => completeArgFacts(arg, false, { isDeclared })),
+    ...(field.omittedArgs ?? []).flatMap(arg => completeArgFacts(arg, true, { isDeclared })),
+  ]
+}
+
+function completeValueText(value: unknown): string {
+  try { return esc(JSON.stringify(value) ?? String(value), Infinity) } catch { return esc(String(value), Infinity) }
+}
+
+export function completeArgFacts(arg: ArgIR | OmittedArg, isOmitted: boolean, context: boolean | FactContext = false): string[] {
+  const { isDeclared = false } = factContext(context)
+  const omitted = arg as OmittedArg
+  const set = arg as ArgIR
+  return [
+    `${esc(arg.name, Infinity)}: ${esc(arg.type ?? '?', Infinity)}${isOmitted ? ` · ${omitted.isRequired ? 'required' : 'optional'}${omitted.default === undefined ? '' : ` · default ${esc(omitted.default, Infinity)}`}` : ` = ${completeValueText(set.value)}`}`,
+    ...(arg.type === undefined ? [] : [`type: ${typeSaid(arg.type)}`]),
+    ...(isDeclared ? ['argument declaration; no operation was submitted'] : !isOmitted ? [`set: ${set.fromVariable ? 'from a variable' : 'by the call'}`] : [omitted.default === undefined ? 'not supplied by the call' : 'the schema default applies when this argument is omitted']),
+    ...(!isOmitted && set.defaultValue !== undefined ? [`default: ${esc(set.defaultValue, Infinity)}`] : []),
+    ...(arg.description === undefined ? [] : [esc(arg.description, Number.MAX_SAFE_INTEGER)]),
+    ...('hints' in arg ? arg.hints ?? [] : []).map(one => `hint: ${esc(one, Infinity)}`),
+    ...(arg.enumValues ?? []).map(one => `value: ${esc(one, Infinity)}`),
+    ...('inputFields' in arg ? arg.inputFields ?? [] : []).map(one => `input: ${esc(one, Infinity)}`),
+  ]
+}
 
 /** Schema and call text, escaped first and then laid flat: a newline in it is layout, not content. */
 export const flat = (text: string, max: number) => esc(text, max).replace(/\s+/g, ' ').trim()
@@ -52,14 +102,11 @@ export function valueText(value: unknown, max = 4_000): string {
  * outcome's own tally of distinct rows, shown ones too; an outcome stored
  * before it was kept counts the errors listed.
  */
-export function denialsOf(outcome: CallOutcome | undefined, name: string, rootKey?: string) {
-  const errors = (outcome?.errors ?? []).filter(error => error.isDenied === true && error.field === name)
-  const tagged = (outcome?.preview ?? []).flatMap(list => list.items.flatMap(item => item.denied ?? [])).filter(one => one.field === name || one.field.endsWith(`.${name}`))
-  const classification = errors.find(error => error.classification !== undefined)?.classification ?? tagged.find(one => one.classification !== undefined)?.classification
-  const requestable = errors.find(error => error.isRequestable !== undefined)?.isRequestable ?? tagged.find(one => one.isRequestable !== undefined)?.isRequestable
-  const tallies = (outcome?.denials ?? []).filter(one => one.field === name && (rootKey === undefined || one.root === rootKey))
-  if (outcome?.denials !== undefined) return { classification, requestable, count: tallies.reduce((sum, one) => sum + (one.rows ?? 0), 0), of: tallies.find(one => one.of !== undefined)?.of }
-  return { classification, requestable, count: errors.reduce((sum, error) => sum + (error.count ?? 1), 0), of: errors.find(error => error.of !== undefined)?.of }
+export function denialsOf(outcome: CallOutcome | undefined, field: FieldIR | string, rootKey?: string, roots?: readonly FieldIR[]) {
+  const matches = typeof field === 'string' ? observedDenials(outcome, roots).filter(one => one.name === field && (rootKey === undefined || one.root === rootKey)) : [denialFor(field, outcome, roots)].filter(one => one !== undefined)
+  // The compatibility name-based API cannot choose between occurrences.
+  const denied = matches.length === 1 ? matches[0] : undefined
+  return { classification: denied?.classification, requestable: denied?.isRequestable, count: denied?.rows ?? denied?.count ?? 0, of: denied?.of }
 }
 
 /**
@@ -68,23 +115,27 @@ export function denialsOf(outcome: CallOutcome | undefined, name: string, rootKe
  * say it: src/attention.ts classificationOf), then whether a denial can be
  * requested; empty when neither is known.
  */
-export function classificationNote(field: FieldIR, outcome: CallOutcome | undefined, withRequest = true): string {
-  const denied = denialsOf(outcome, field.name)
+export function classificationNote(field: FieldIR, outcome: CallOutcome | undefined, withRequest = true, roots?: readonly FieldIR[]): string {
+  const denied = denialsOf(outcome, field, undefined, roots)
   const one = classifiedOf(field) ?? denied.classification
   return [one === undefined ? undefined : `classified ${esc(one, 40)}`, !withRequest || denied.requestable === undefined ? undefined : denied.requestable ? 'requestable' : 'not requestable'].filter(Boolean).join(' · ')
 }
 
 const POLICY_WORDS: Record<FieldIR['policy'], string> = {
   allow: 'allowed',
-  mask: 'masked: the value comes back hidden',
-  deny: 'denied: the field is refused',
-  unknown: 'not checked',
+  mask: 'masking reported',
+  deny: 'denial reported',
+  unknown: 'no field decision retained',
 }
 
 /** The field's policy in words, with classification and requestability when known. */
-export function policyLine(field: FieldIR, outcome: CallOutcome | undefined): string {
-  const note = classificationNote(field, outcome)
-  return `${POLICY_WORDS[field.policy]}${note === '' ? '' : ` · ${note}`}`
+export function policyLine(field: FieldIR, outcome: CallOutcome | undefined, roots?: readonly FieldIR[]): string {
+  const schemaClass = classifiedOf(field)
+  const check = `dry_run: ${POLICY_WORDS[field.policy]}${schemaClass === undefined ? '' : ` · classified ${esc(schemaClass, 40)} (schema)`}`
+  const observed = denialFor(field, outcome, roots)
+  if (observed === undefined) return check
+  const note = classificationNote(field, outcome, true, roots)
+  return `execution response: denied${note === '' ? '' : ` · ${note}`} · ${check}`
 }
 
 /** One set argument as SDL writes it, with where its value came from. */
@@ -102,18 +153,19 @@ export function unsetLines(field: FieldIR): string[] {
 }
 
 /** What came back for a field, once settled: rows, a scalar, how many items denied it. */
-export function cameBack(field: FieldIR, outcome: CallOutcome | undefined): string[] {
+export function cameBack(field: FieldIR, outcome: CallOutcome | undefined, roots?: readonly FieldIR[]): string[] {
   if (outcome === undefined) return []
   const lines: string[] = []
   // By the root's response key too: two aliases of one field are two roots, each with its own rows.
   const rootKey = field.path.split('.')[0]
-  const rows = outcome.rows.find(row => row.field === field.name && (row.root === undefined || row.root === rootKey))
+  const uniqueLegacyName = (root: string | undefined) => roots !== undefined && walk(roots).filter(one => one.name === field.name && (root === undefined || one.path.split('.')[0] === root)).length === 1
+  const rows = outcome.rows.find(row => row.field === field.name && (row.root === rootKey || (row.root === undefined && uniqueLegacyName(undefined))))
   if (rows !== undefined) {
     lines.push(`${rows.count.toLocaleString('en-US')} row${rows.count === 1 ? '' : 's'}${rows.total !== undefined && rows.total > rows.count ? ` of ${rows.total.toLocaleString('en-US')} in all` : ''}`)
   }
-  const scalar = field.children.length === 0 ? (outcome.scalars ?? []).find(one => (one.path === undefined ? one.field === field.name : one.path === field.path)) : undefined
+  const scalar = field.children.length === 0 ? (outcome.scalars ?? []).find(one => one.path === undefined ? one.field === field.name && (one.root === undefined || one.root === rootKey) && uniqueLegacyName(one.root) : one.path === field.path) : undefined
   if (scalar !== undefined) lines.push(`value ${flat(String(scalar.value), 80)}`)
-  const denied = denialsOf(outcome, field.name, rootKey)
+  const denied = denialsOf(outcome, field, rootKey, roots)
   if (denied.count > 0) lines.push(`denied in ${denied.of !== undefined ? `${denied.count} of ${denied.of}` : denied.count} item${denied.count === 1 ? '' : 's'}`)
   return lines
 }
@@ -133,7 +185,7 @@ export function personalNote(field: FieldIR): string | undefined {
 export function scopesNote(ir: CallIR): string | undefined {
   const fields = walk(ir.roots)
   const isRead = ir.state !== 'analyzing' && (ir.checks === undefined || ir.checks.schema === 'ok')
-  return isRead && fields.length > 0 && fields.every(field => (field.schema?.scopes.length ?? 0) === 0) ? 'no scopes required by the schema' : undefined
+  return isRead && fields.length > 0 && fields.every(field => field.schema !== undefined && field.schema.scopes.length === 0) ? 'no scopes listed for the selected fields in the available schema' : undefined
 }
 
 /** The validate and dry_run results: `validate ✓ · dry_run ✓ 3 allowed, 1 denied`. */
@@ -309,7 +361,7 @@ export function opFacts(ir: CallIR): string[] {
 }
 
 /** Summary credit: model and input sources. */
-export const CREDIT_FACTS = ['A one-line headline Haiku wrote from the operation and the schema.'] as const
+export const CREDIT_FACTS = ['A best-effort explanation Haiku wrote from the operation, lookup inputs and schema facts.', 'Execution results and access-request tokens are excluded. Access-check summaries may use reported policy decisions; the displayed verdicts are computed from evidence separately.'] as const
 
 /** What the header's status word means (`✓ ran`, `ran · 2 errors`, `failed`, `1 of 3`). */
 export function statusFacts(word: string, outcome: CallOutcome | undefined): string[] {
@@ -318,6 +370,7 @@ export function statusFacts(word: string, outcome: CallOutcome | undefined): str
   if (queued !== null) return [`${queued[1]} calls are waiting at their prompts; this pane shows the oldest, and the next as each one settles.`]
   if (word === 'failed') return ['The tool call failed: an error came back instead of a GraphQL response.']
   if (word === 'denied') return ['The call was refused before it ran, at the permission prompt or by a hook: nothing reached Agent Services.']
+  if (word === 'interrupted') return ['Observation ended before a response was received. This does not establish whether Agent Services ran the call.']
   if (word === 'errors') return ['The response carried errors and no data: nothing that was asked for came back. RESULT lists each error.']
   if (word === 'needs sign-in') return ['Agent Services answered, but a service the call reads needs your account linked first (UPSTREAM_AUTH_REQUIRED), so nothing came back. Follow the sign-in link under RESULT, then run the call again.']
   const errors = /^ran · (\d+) errors?$/.exec(word)

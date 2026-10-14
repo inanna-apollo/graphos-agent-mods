@@ -25,6 +25,8 @@ import type { ArgIR, CallIR, CallOutcome, FieldIR, OmittedArg } from '../../ir.t
 import { isPolicyUnit, leafPolicyCounts } from '../../annotate.ts'
 import type { Ctx } from '../kit.ts'
 import {
+  completeArgFacts,
+  completeFieldFacts,
   CREDIT_FACTS,
   NO_DESCRIPTION,
   NO_SCHEMA,
@@ -49,13 +51,15 @@ import {
   valuesBack,
 } from '../card-facts.ts'
 import { esc, policyColor, policyMark, walk } from '../kit.ts'
+import { checkPreview } from '../checks.ts'
 import { pagingNote, pagingRole } from '../paging.ts'
-import { cardId, cellWidth, cellsOf } from '../plan.ts'
+import { cardId, cellWidth, cellsOf, wrapLines } from '../plan.ts'
 import { PolicyChip, statusOf } from './index.tsx'
+import { LOOKUP_FACTS, callStatusOf, lookupStatusFacts, subjectOf, termsOf } from '../kinds.ts'
 import { isWriteAllowed } from '../outcome.ts'
-import { COLOR, PANEL, RIGHT_PAD, STRUCT, struct } from './theme.ts'
+import { COLOR, PANEL, TEXT, QUIET, SELECTED, RIGHT_PAD, STRUCT, struct } from './theme.ts'
 
-/** A card says a description whole: the card is where it lives (escaped and laid flat at 4000 characters). */
+/** Detail facts remain complete; the preview renderer bounds visible hover rows. */
 const DESCRIPTION_LINES = Infinity
 const ARG_DESCRIPTION_LINES = Infinity
 const ROOT_DESCRIPTION_LINES = Infinity
@@ -79,7 +83,7 @@ export function hoverScope(id: string): string {
   return `gas-${id.slice(0, id.indexOf(':'))}-${hash(id)}`
 }
 
-const litBy = (scope: string): TextHoverProps => ({ scope, inverse: true, dimColor: false })
+const litBy = (scope: string): TextHoverProps => ({ scope, color: TEXT, backgroundColor: SELECTED })
 
 /** An argument name lights its card; the key is the root's path and the argument's name. */
 export function argHover(rootPath: string, name: string): TextHoverProps {
@@ -122,7 +126,7 @@ export function foldHover(path: string): TextHoverProps {
   return litBy(hoverScope(cardId.fold(path)))
 }
 
-/** What a field name carries to light its group: inverse, at full strength. */
+/** What a field name carries to light its group: white on teal. */
 export function nameHover(path: string): TextHoverProps {
   return litBy(hoverScope(cardId.field(path)))
 }
@@ -137,36 +141,7 @@ export function idHover(id: string): TextHoverProps {
 const widthOf = cellWidth
 
 /** Word-wraps `text` to `width` cells; a word wider than a line is split. */
-function wrap(text: string, width: number): string[] {
-  const lines: string[] = []
-  let line = ''
-  const push = () => {
-    lines.push(line)
-    line = ''
-  }
-  for (const word of text.split(' ')) {
-    if (word === '') continue
-    const room = width - widthOf(line) - (line === '' ? 0 : 1)
-    if (widthOf(word) <= room) {
-      line = line === '' ? word : `${line} ${word}`
-      continue
-    }
-    if (line !== '') push()
-    let rest = word
-    while (widthOf(rest) > width) {
-      let cut = ''
-      for (const char of rest) {
-        if (widthOf(cut) + cellsOf(char) > width) break
-        cut += char
-      }
-      lines.push(cut)
-      rest = rest.slice(cut.length)
-    }
-    line = rest
-  }
-  if (line !== '') push()
-  return lines.length === 0 ? [''] : lines
-}
+const wrap = wrapLines
 
 /**
  * `text` word-wrapped to the full `width`, as a plain wrap fills it, except
@@ -187,7 +162,7 @@ export function pretty(text: string, width: number): string[] {
 }
 
 /** The cells a card's text has: the pane less the card's inset, outline and padding. */
-export const cardWidth = (ctx: Ctx) => Math.max(10, ctx.columns - CARD_INSET)
+export const cardWidth = (ctx: Ctx) => Math.max(1, Math.min(72, ctx.columns) - CARD_INSET)
 
 /** A card paragraph, wrapped to the full width with no lone last word (pretty), each line starting `indent` cells in. */
 export function Para({ ctx, text, dim = false, indent = 0 }: { ctx: Ctx; text: string; dim?: boolean; indent?: number }) {
@@ -195,7 +170,7 @@ export function Para({ ctx, text, dim = false, indent = 0 }: { ctx: Ctx; text: s
   const pad = ''.padEnd(indent)
   // One Text, its lines already broken (each fits): the words stay one run of text, as a reader copies it.
   const lines = text.split('\n').flatMap(part => pretty(part, Math.max(1, cardWidth(ctx) - indent)))
-  return <Text dimColor={dim}>{lines.map(line => `${pad}${line}`).join('\n')}</Text>
+  return <Text color={dim ? QUIET : TEXT}>{lines.map(line => `${pad}${line}`).join('\n')}</Text>
 }
 
 /** `lines`, cut to `max` with the last one ending in `…`. */
@@ -244,16 +219,18 @@ export function placeOf(ctx: Ctx, id: string): Place | undefined {
  * under it, so cards have no layer around them. Nothing when the trigger is
  * not drawn.
  */
-export function Frame({ ctx, id, title, children }: { ctx: Ctx; id: string; title: string; children: RenderChildren }) {
+export function Frame({ ctx, id, title, children, contentRows }: { ctx: Ctx; id: string; title: string; children: RenderChildren; contentRows?: number }) {
   const { Box, Text } = ctx.kit
   const place = placeOf(ctx, id)
   if (place === undefined) return null
   const scope = hoverScope(id)
-  // Above, the card's bottom edge sits on the trigger's first row: `bottom` counts from the pane's last row.
-  const side = place.isBelow ? { top: place.row + place.rows } : { bottom: Math.max(0, (ctx.cards?.total ?? 0) - place.row) }
+  // Known compact content includes the title; add the frame's two border rows.
+  const rows = Math.max(1, Math.min(10, ctx.cards?.rows ?? 10, contentRows === undefined ? 10 : contentRows + 2))
+  const top = Math.max(ctx.cards?.top ?? 0, Math.min(place.isBelow ? place.row + place.rows : place.row - rows, (ctx.cards?.top ?? 0) + (ctx.cards?.rows ?? rows) - rows))
+
   return (
-    <Box key={`card:${scope}`} position="absolute" left={CARD_LEFT} right={RIGHT_PAD} {...side} flexDirection="column" display="none" hover={{ scope, display: 'flex' }}>
-      <Box flexDirection="column" borderStyle="round" borderColor={STRUCT.card} backgroundColor={PANEL} paddingX={1}>
+    <Box key={`card:${scope}`} position="absolute" left={CARD_LEFT} top={top} width={Math.max(1, Math.min(72, ctx.columns))} height={rows} overflow="hidden" flexDirection="column" display="none" hover={{ scope, display: 'flex' }}>
+      <Box flexDirection="column" borderStyle="round" borderColor={STRUCT.card} backgroundColor={PANEL} paddingX={1} height={rows} overflow="hidden">
         <Text bold color={STRUCT.card} wrap="wrap">
           {title}
         </Text>
@@ -273,7 +250,7 @@ export function Fact({ ctx, label, text }: { ctx: Ctx; label: string; text: stri
   const column = Math.max(LABEL_CELLS, widthOf(label) + 1)
   const lines = text.split('\n').flatMap(part => pretty(part, Math.max(1, cardWidth(ctx) - column)))
   return (
-    <Text>
+    <Text color={TEXT}>
       <Text {...struct(STRUCT.cardLabel)}>{label.padEnd(column)}</Text>
       {lines.join(`\n${''.padEnd(column)}`)}
     </Text>
@@ -289,7 +266,7 @@ function Quoted({ ctx, text, max }: { ctx: Ctx; text: string | undefined; max: n
   return (
     <Box flexDirection="column">
       {cap(wrap(`“${laid}”`, width), max, width).map(line => (
-        <Text dimColor>
+        <Text color={QUIET}>
           {line}
         </Text>
       ))}
@@ -312,17 +289,12 @@ function Hint({ ctx, text }: { ctx: Ctx; text: string }) {
 export function Described({ ctx, text, isRead, max }: { ctx: Ctx; text: string | undefined; isRead: boolean; max: number }) {
   const { Text } = ctx.kit
   if (text !== undefined && flat(text, 4000) !== '') return <Quoted ctx={ctx} text={text} max={max} />
-  return <Text dimColor>{isRead ? NO_DESCRIPTION : NO_SCHEMA}</Text>
+  return <Text color={QUIET}>{isRead ? NO_DESCRIPTION : NO_SCHEMA}</Text>
 }
 
 /** A type as GraphQL writes it and in words (`[Issue!]!: a list, never null, of issues that are never null`), then a line on what its marks mean. */
 export function TypeFacts({ ctx, label, sdl, scope, isOpaque = false }: { ctx: Ctx; label: string; sdl: string; scope?: string | undefined; isOpaque?: boolean }) {
-  return (
-    <>
-      <Fact ctx={ctx} label={label} text={`${esc(sdl, 200)}: ${typeSaid(sdl, scope, isOpaque)}`} />
-      <Hint ctx={ctx} text={typeLesson(sdl)} />
-    </>
-  )
+  return <Fact ctx={ctx} label={label} text={`${esc(sdl, 200)}: ${typeSaid(sdl, scope, isOpaque)}`} />
 }
 
 /** Fact rows from a list: the label on the first, blanks after. */
@@ -344,7 +316,7 @@ function Block({ ctx, label, text }: { ctx: Ctx; label: string; text: string }) 
   return (
     <>
       {lines.map((line, index) => (
-        <Text wrap="wrap">
+        <Text color={TEXT} wrap="wrap">
           <Text {...struct(STRUCT.cardLabel)}>{(index === 0 ? label : '').padEnd(LABEL_CELLS)}</Text>
           {line}
         </Text>
@@ -373,14 +345,15 @@ function FieldFacts({ ctx, field, outcome, isRoot, role, back, policy }: { ctx: 
       {schema !== undefined && <TypeFacts ctx={ctx} label={isRoot ? 'returns' : 'type'} sdl={schema.type} scope={field.service} isOpaque={schema.isOpaque === true} />}
       {role !== undefined && <Fact ctx={ctx} label="paging" text={role} />}
       {policy}
-      {schema?.isOpaque === true && <Text dimColor>untyped JSON: any shape, which the schema does not describe, so it takes no sub-selection</Text>}
+      {schema?.isOpaque === true && <Text color={QUIET}>untyped JSON: any shape, which the schema does not describe, so it takes no sub-selection</Text>}
       {schema?.deprecated !== undefined && (
         <Fact ctx={ctx} label="deprecated" text={flat(schema.deprecated, 600)} />
       )}
       {need !== undefined && <Fact ctx={ctx} label="include" text={`${need.mode === 'only' ? 'returned only' : 'returned in full'} when include has ${esc(need.value, 60)}`} />}
       {(schema?.hints ?? []).length > 0 && <Fact ctx={ctx} label="hints" text={(schema?.hints ?? []).map(hint => esc(hint, 80)).join(' · ')} />}
       <Facts ctx={ctx} label="args" lines={field.args.map(argLine)} />
-      <Facts ctx={ctx} label="unset" lines={unsetLines(field)} />
+      {/* A schema view's arguments are declared, not left unset by a call. */}
+      <Facts ctx={ctx} label={ctx.profile?.isDeclared === true ? 'args' : 'unset'} lines={unsetLines(field)} />
       {field.paging !== undefined && <Fact ctx={ctx} label="paging" text={pagingNote(field.paging)} />}
       <Facts ctx={ctx} label="needs" lines={(schema?.scopes ?? []).map(one => esc(one, 200))} />
       {schema !== undefined && schema.scopes.length === 0 && <Fact ctx={ctx} label="needs" text="no scopes listed in the schema" />}
@@ -390,70 +363,24 @@ function FieldFacts({ ctx, field, outcome, isRoot, role, back, policy }: { ctx: 
 }
 
 /** One field's card, hidden until its group is lit. */
+export function CompactFacts({ ctx, lines, hint }: { ctx: Ctx; lines: readonly string[]; hint?: string }) {
+  const wrapped = lines.flatMap(line => pretty(line, cardWidth(ctx)))
+  const room = Math.max(0, Math.min(10, ctx.cards?.rows ?? 10) - 4)
+  return <ctx.kit.Box flexDirection="column">{wrapped.slice(0, room).map(line => <ctx.kit.Text color={TEXT}>{line}</ctx.kit.Text>)}<ctx.kit.Text color={QUIET}>{hint ?? (ctx.isSettled ? 'Enter on the name: full details · d: all details' : 'Preview · approval facts stay in the pane')}</ctx.kit.Text></ctx.kit.Box>
+}
+
 function Card({ ctx, ir, field, outcome }: { ctx: Ctx; ir: CallIR; field: FieldIR; outcome: CallOutcome | undefined }) {
-  const { Box } = ctx.kit
-  const chip = field.policy === 'mask' || field.policy === 'deny' ? field.policy : undefined
-  const personal = personalNote(field)
-  const { root, parent } = fieldPlace(ir.roots, field)
-  const role = root === undefined ? undefined : pagingRole(field, root, parent)
-  return (
-    <Frame ctx={ctx} id={cardId.field(field.path)} title={typeTitle(field)}>
-      {chip !== undefined && (
-        <Box flexDirection="row">
-          <PolicyChip kit={ctx.kit} kind={chip} isDim={ctx.isSettled} />
-        </Box>
-      )}
-      <FieldFacts
-        ctx={ctx}
-        field={field}
-        outcome={outcome}
-        isRoot={false}
-        role={role}
-        back={valuesBack(field, parent, outcome)}
-        policy={[<Fact ctx={ctx} label="policy" text={policyLine(field, outcome)} />, ...(personal === undefined ? [] : [<Fact ctx={ctx} label="personal" text={personal} />])]}
-      />
-    </Frame>
-  )
+  return <Frame ctx={ctx} id={cardId.field(field.path)} title={typeTitle(field)}><CompactFacts ctx={ctx} lines={completeFieldFacts(field, outcome, { ...ctx.profile, tool: ctx.tool }, ir.roots)} /></Frame>
 }
 
 /** An argument's card: `name: Type`, then everything the form leaves off. */
 function ArgCard({ ctx, root, arg }: { ctx: Ctx; root: FieldIR; arg: ArgIR }) {
-  const values = arg.enumValues ?? []
-  const hints = arg.hints ?? []
-  const keys = typeof arg.value === 'object' && arg.value !== null && !Array.isArray(arg.value) ? Object.keys(arg.value) : []
-  return (
-    <Frame ctx={ctx} id={cardId.arg(root.path, arg.name)} title={`${esc(arg.name, 100)}: ${arg.type === undefined ? '?' : esc(arg.type, 200)}`}>
-      <Described ctx={ctx} text={arg.description?.trim()} isRead={arg.type !== undefined} max={ARG_DESCRIPTION_LINES} />
-      {argKind(arg, root) !== undefined && <Fact ctx={ctx} label="kind" text={argKind(arg, root) ?? ''} />}
-      {arg.type !== undefined && <TypeFacts ctx={ctx} label="type" sdl={arg.type} scope={root.service} />}
-      <Fact ctx={ctx} label="set" text={arg.fromVariable ? 'by the call, from a variable' : 'by the call'} />
-      <Block ctx={ctx} label="value" text={valueText(arg.value)} />
-      {keys.length > 0 && <Fact ctx={ctx} label="fields" text={keys.slice(0, LISTED).map(key => esc(key, 60)).join(' · ')} />}
-      <Fact ctx={ctx} label="default" text={arg.defaultValue !== undefined ? `${esc(arg.defaultValue, 300)} (used when the call leaves it out)` : 'none'} />
-      {hints.length > 0 && <Fact ctx={ctx} label="limits" text={hints.map(hint => esc(hint, 80)).join(' · ')} />}
-      {values.length > 0 && (
-        <Fact
-          ctx={ctx}
-          label="one of"
-          text={`${values.slice(0, LISTED).map(value => esc(value, 60)).join(' · ')}${values.length > LISTED ? ` … ${values.length - LISTED} more` : ''}`}
-        />
-      )}
-    </Frame>
-  )
+  return <Frame ctx={ctx} id={cardId.arg(root.path, arg.name)} title={`${esc(arg.name)}: ${esc(arg.type ?? '?')}`}><CompactFacts ctx={ctx} lines={completeArgFacts(arg, false, { ...ctx.profile, tool: ctx.tool })} /></Frame>
 }
 
 /** An argument the call left out, drawn with its default under the set ones: what it is, and that the server uses its default. */
 function OmittedArgCard({ ctx, root, arg }: { ctx: Ctx; root: FieldIR; arg: OmittedArg }) {
-  const kind = argKind(arg, root)
-  return (
-    <Frame ctx={ctx} id={cardId.arg(root.path, arg.name)} title={`${esc(arg.name, 100)}: ${esc(arg.type, 200)}`}>
-      <Described ctx={ctx} text={arg.description?.trim()} isRead max={ARG_DESCRIPTION_LINES} />
-      {kind !== undefined && <Fact ctx={ctx} label="kind" text={kind} />}
-      <TypeFacts ctx={ctx} label="type" sdl={arg.type} scope={root.service} />
-      <Fact ctx={ctx} label="set" text="not by the call: the server uses its default" />
-      <Fact ctx={ctx} label="default" text={esc(arg.default ?? '', 300)} />
-    </Frame>
-  )
+  return <Frame ctx={ctx} id={cardId.arg(root.path, arg.name)} title={`${esc(arg.name)}: ${esc(arg.type)}`}><CompactFacts ctx={ctx} lines={completeArgFacts(arg, true, { ...ctx.profile, tool: ctx.tool })} /></Frame>
 }
 
 /**
@@ -476,12 +403,12 @@ function FoldCard({ ctx, field, outcome }: { ctx: Ctx; field: FieldIR; outcome: 
         const type = one.schema === undefined ? '?' : esc(one.schema.type, 120)
         return (
           <Box flexDirection="column">
-            <Text wrap="wrap">
+            <Text color={TEXT} wrap="wrap">
               {'  '.repeat(depth)}
               {mark !== undefined && color !== undefined && <Text color={color} bold>{`${mark} `}</Text>}
               <Text bold={one.children.length > 0}>{esc(one.name, 120)}</Text>
               <Text {...struct(STRUCT.cardLabel)}>{`  ${type}`}</Text>
-              {one.children.length === 0 && (color === undefined ? <Text dimColor>{`  ${one.policy === 'unknown' ? 'not checked' : 'allowed'}`}</Text> : <Text color={color}>{`  ${one.policy === 'deny' ? 'denied' : 'masked'}`}</Text>)}
+              {one.children.length === 0 && (color === undefined ? <Text color={QUIET}>{`  ${one.policy === 'unknown' ? 'not checked' : 'allowed'}`}</Text> : <Text color={color}>{`  ${one.policy === 'deny' ? 'denied' : 'masked'}`}</Text>)}
             </Text>
             {note !== '' && (
               <Para ctx={ctx} dim indent={2 * (depth + 1)} text={note} />
@@ -489,23 +416,14 @@ function FoldCard({ ctx, field, outcome }: { ctx: Ctx; field: FieldIR; outcome: 
           </Box>
         )
       })}
-      {all.length > LISTED && <Text dimColor>{`… ${all.length - LISTED} more`}</Text>}
+      {all.length > LISTED && <Text color={QUIET}>{`… ${all.length - LISTED} more`}</Text>}
     </Frame>
   )
 }
 
 /** The root's card: description, return type, every argument, paging, scopes, the checks. */
 function RootCard({ ctx, ir, root, outcome }: { ctx: Ctx; ir: CallIR; root: FieldIR; outcome: CallOutcome | undefined }) {
-  const checks = checkLine(ir, leafPolicyCounts(ir.roots))
-  const diagnostics = ir.validation?.valid === false ? ir.validation.diagnostics.slice(0, 3).map(one => flat(one, 200)) : []
-  return (
-    <Frame ctx={ctx} id={cardId.root(root.path)} title={typeTitle(root)}>
-      <FieldFacts ctx={ctx} field={root} outcome={outcome} isRoot />
-      {checks !== undefined && <Fact ctx={ctx} label="checks" text={checks} />}
-      <Facts ctx={ctx} label="invalid" lines={diagnostics} />
-      {ir.checks?.error !== undefined && <Fact ctx={ctx} label="error" text={flat(ir.checks.error, 200)} />}
-    </Frame>
-  )
+  return <Frame ctx={ctx} id={cardId.root(root.path)} title={typeTitle(root)}><CompactFacts ctx={ctx} lines={completeFieldFacts(root, outcome, { ...ctx.profile, tool: ctx.tool }, ir.roots)} /></Frame>
 }
 
 /**
@@ -592,26 +510,48 @@ function Lines({ ctx, id, title, lines }: { ctx: Ctx; id: string; title: string;
  * roots each serves, the operation name (the agent's own label), the status
  * word, and the `summary · Haiku` credit (model and input sources).
  */
+/** What a lookup asked for, for the card on the header's subject. Escaped. */
+function subjectFacts(call: InspectedCall): string[] {
+  const input = call.input ?? {}
+  const scope = input.scope === undefined ? 'every service you can reach' : esc(input.scope, 80)
+  if (call.tool === 'introspect') {
+    return [`The type Claude asked introspect for, in ${scope}.`, `depth ${input.depth ?? 1}: the referenced types the answer includes, in hops (0 is every one).`]
+  }
+  const terms = input.terms ?? []
+  return [
+    terms.length === 0 ? 'Claude asked for the catalog only: the services this graph reaches.' : `The terms Claude searched for: ${termsOf(call)}. Matching is by word, against operation and type names and descriptions.`,
+    `where: ${scope}`,
+    ...(input.operationType === undefined ? [] : [`only: ${input.operationType === 'query' ? 'reads (queries)' : 'writes (mutations)'}`]),
+  ]
+}
+
 export function headerCards(ctx: Ctx, call: InspectedCall, waiting: number): RenderNode[] {
   const { Text } = ctx.kit
   const { ir } = call
-  const badge = badgeFacts(ir)
+  const badge = call.tool === undefined ? badgeFacts(ir) : LOOKUP_FACTS[call.tool]
   const services = serviceFacts(ir)
-  const status = statusOf(call.status, waiting, call.outcome)
+  const status = callStatusOf(call, waiting)
   const word = status === undefined ? '' : `${status.glyph === '' ? '' : `${status.glyph} `}${status.word}`
+  const subject = subjectOf(call)
+  const statusLines = lookupStatusFacts(call, status?.word ?? '') ?? statusFacts(status?.word ?? '', call.status === 'ran' ? call.outcome : undefined)
   return [
+    <Frame ctx={ctx} id={cardId.checks()} title="Inspection checks"><CompactFacts ctx={ctx} lines={checkPreview(call)} hint={ctx.isSettled ? 'Enter on Checks: full context · d: all details' : 'Preview · approval facts stay in the pane'} /></Frame>,
     <Lines ctx={ctx} id={cardId.badge()} title={badge.title} lines={badge.lines} />,
     <Frame ctx={ctx} id={cardId.services()} title={services.length === 1 ? `${services[0]?.service ?? 'a service'} · the service` : `${services.length} services`}>
       {services.map(one => (
-        <Text wrap="wrap">
+        <Text color={TEXT} wrap="wrap">
           <Text bold>{one.service}</Text>
-          <Text dimColor>{`  ${one.roots.join(' · ')}`}</Text>
+          <Text color={QUIET}>{`  ${one.roots.join(' · ')}`}</Text>
         </Text>
       ))}
       <Para ctx={ctx} dim text="Agent Services runs each root field against its own service, under that service's policy." />
     </Frame>,
-    <Lines ctx={ctx} id={cardId.op()} title={`${esc(ir.opName ?? '', 200)} · operation name`} lines={opFacts(ir)} />,
-    <Lines ctx={ctx} id={cardId.status()} title={word} lines={statusFacts(status?.word ?? '', call.status === 'ran' ? call.outcome : undefined)} />,
+    subject === undefined ? (
+      <Lines ctx={ctx} id={cardId.op()} title={`${esc(ir.opName ?? '', 200)} · operation name`} lines={opFacts(ir)} />
+    ) : (
+      <Lines ctx={ctx} id={cardId.op()} title={call.tool === 'introspect' ? `${subject} · the type asked for` : `${subject} · what was searched for`} lines={subjectFacts(call)} />
+    ),
+    <Lines ctx={ctx} id={cardId.status()} title={word} lines={statusLines} />,
     <Lines ctx={ctx} id={cardId.credit()} title="summary · Haiku" lines={CREDIT_FACTS} />,
   ]
 }

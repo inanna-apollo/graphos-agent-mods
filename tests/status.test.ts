@@ -1,7 +1,4 @@
-// The standing line under the prompt through the engine ($.ui.status): what
-// it says as calls arrive and settle, as trust rules load and switch, and that
-// a session with nothing to report says nothing at all. Behaviour only: the
-// text the engine was handed. The wording is covered in test/unit/status.spec.ts.
+// Trust enforcement survives conversation resets; activity never posts a status footer.
 
 import type { On } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
@@ -85,105 +82,35 @@ function caller(on: On, answer = '{"data":{"confluence_search":{"results":[]}}}'
 const start = ($: Engine) => $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
 const command = ($: Engine, args: string) => $.command.run({ command: 'gas', args, origin: { kind: 'composer' as const }, presentation: { isFullscreen: false, columns: 80 } })
 
-test('a session with no Agent Services call and no trust rules says nothing at all', async ($, on) => {
-  const clock = mock.clock(on)
-  const status = world(on, undefined)
-  await start($)
-  await until(clock, () => false, 500)
-  expect(status.lines).toEqual([])
-})
+for (const source of ['clear', 'resume', 'fork'] as const) {
+  test(`trust enforcement resets after ${source} resets the conversation`, async ($, on) => {
+    const clock = mock.clock(on)
+    const status = world(on, RULES)
+    const checked = caller(on)
+    let isReset = false
+    // Classic events in the harness dispatch hooks only. Model the host's
+    // documented atom reset independently of the module's surviving locals.
+    on('state.get', (_, e, next) => isReset && e.key === 'isTrustOff' ? { value: { value: undefined, version: 0 } } : next(e))
+    on('classic.SessionStart', () => ({}))
+    await start($)
+    await command($, 'trust off')
+    expect((await checked($, clock, FITS)).decision).toBe('ask')
+    const reads = status.reads.filter(path => path === RULES_FILE).length
+    isReset = true
+    await $.classic.SessionStart({ source })
+    expect((await checked($, clock, FITS)).decision).toBe('allow')
+    expect(status.reads.filter(path => path === RULES_FILE).length).toBe(reads)
+  })
+}
 
-test('trust rules loaded at the start show as a count', async ($, on) => {
+test('session activity leaves the retired footer cleared', async ($, on) => {
   const clock = mock.clock(on)
   const status = world(on, RULES)
-  await start($)
-  await until(clock, () => status.last() !== undefined, 2_000)
-  expect(status.last()).toMatch(/1 trust rule\b/)
-})
-
-test('calls are counted as they arrive, and a call that fit a rule is counted as having run unasked, one that asked is not', async ($, on) => {
-  const clock = mock.clock(on)
-  const status = world(on, RULES)
-  const checked = caller(on)
-  await start($)
-
-  expect((await checked($, clock, OUTSIDE)).decision).toBe('ask')
-  await until(clock, () => /1 call\b/.test(status.last() ?? ''), 2_000)
-  expect(status.last()).toMatch(/1 call\b/)
-  expect(status.last()).not.toMatch(/unasked/)
-
-  expect((await checked($, clock, FITS)).decision).toBe('allow')
-  await until(clock, () => /2 calls/.test(status.last() ?? '') && /unasked/.test(status.last() ?? ''), 2_000)
-  expect(status.last()).toMatch(/2 calls/)
-  expect(status.last()).toMatch(/1 ran unasked/)
-  expect(status.last()).toMatch(/1 trust rule\b/)
-})
-
-test('the engine’s own allow is not a trust rule: such a call is counted, and never as ran unasked', async ($, on) => {
-  const clock = mock.clock(on)
-  const status = world(on, RULES, { decision: 'allow' })
   const checked = caller(on)
   await start($)
   await checked($, clock, FITS)
-  await until(clock, () => /1 call\b/.test(status.last() ?? ''), 2_000)
-  await until(clock, () => false, 500)
-  expect(status.last()).toMatch(/1 call\b/)
-  expect(status.last()).not.toMatch(/unasked/)
-})
-
-test('/gas trust off says so in the line, and /gas trust on takes it back', async ($, on) => {
-  const clock = mock.clock(on)
-  const status = world(on, RULES)
-  await start($)
-  await until(clock, () => status.last() !== undefined, 2_000)
   await command($, 'trust off')
-  await until(clock, () => /trust off/.test(status.last() ?? ''), 2_000)
-  expect(status.last()).toMatch(/trust off/)
-  await command($, 'trust on')
-  await until(clock, () => /1 trust rule\b/.test(status.last() ?? ''), 2_000)
-  expect(status.last()).toMatch(/1 trust rule\b/)
-})
-
-test('trust turned off during a call is in the line when the call settles, though the call began before', async ($, on) => {
-  const clock = mock.clock(on)
-  const status = world(on, RULES)
-  const checked = caller(on)
-  await start($)
-  await until(clock, () => status.last() !== undefined, 2_000)
-  await command($, 'trust off')
-  await until(clock, () => /trust off/.test(status.last() ?? ''), 2_000)
   await checked($, clock, OUTSIDE)
-  await until(clock, () => /1 call\b/.test(status.last() ?? ''), 2_000)
-  expect(status.last()).toMatch(/1 call\b/)
-  expect(status.last()).toMatch(/trust off/)
-})
-
-test('the line adds up the bytes of the responses Claude read, each call once', async ($, on) => {
-  const clock = mock.clock(on)
-  const status = world(on, undefined)
-  const checked = caller(on)
-  await start($)
-  await checked($, clock, OUTSIDE)
-  await until(clock, () => /\d+ B read/.test(status.last() ?? ''), 2_000)
-  expect(status.last()).toMatch(/1 call\b.*\d+ B read/)
-  const once = Number(/(\d+) B read/.exec(status.last() ?? '')?.[1])
-  await checked($, clock, OUTSIDE)
-  await until(clock, () => /2 calls/.test(status.last() ?? '') && new RegExp(`${once * 2} B read`).test(status.last() ?? ''), 2_000)
-  expect(status.last()).toMatch(new RegExp(`2 calls.*${once * 2} B read`))
-})
-
-test('a response Claude Code kept out of the context was not read: the file the mod read back is not counted', async ($, on) => {
-  const clock = mock.clock(on)
-  const saved = '/home/me/.claude/projects/-p/abc/tool-results/toolu_big.json'
-  const response = { data: { confluence_search: { results: Array.from({ length: 30 }, () => ({ title: 't'.repeat(900) })) } } }
-  const status = world(on, undefined, { files: { [saved]: JSON.stringify([{ type: 'text', text: JSON.stringify(response) }], null, 2) } })
-  const checked = caller(on, `<persisted-output>\nOutput too large (28.1KB). Full output saved to: ${saved}\n\nPreview (first 2KB):\n...\n</persisted-output>`)
-  await start($)
-  await checked($, clock, OUTSIDE)
-  await until(clock, () => status.reads.includes(saved), 2_000)
-  // The file was read back (the pane shows its rows), and the line counts the call and no bytes.
-  expect(status.reads).toContain(saved)
-  await until(clock, () => false, 500)
-  expect(status.last()).toMatch(/1 call\b/)
-  expect(status.last()).not.toMatch(/ read/)
+  expect(status.lines.length).toBeGreaterThan(0)
+  expect(status.lines.every(line => line === undefined)).toBe(true)
 })

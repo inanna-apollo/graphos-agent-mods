@@ -12,7 +12,7 @@ import { allowedShown, meterOf, writeAllowedShown } from '../meter.ts'
 
 export { allowedShown, allowedText, countsCells, isMeterShown } from '../meter.ts'
 import { failureCount } from '../outcome.ts'
-import { BADGE, BADGE_HUE, BULLET, CHIP_WORD, COLOR, DRAWER_GUTTER, DRAWER_INDENT, GLYPH, GUTTER, MARK, NOTE_GLYPH, ROW_GAP, STRUCT, pill, struct } from './theme.ts'
+import { TEXT, QUIET, BADGE, BADGE_HUE, BULLET, CHIP_WORD, COLOR, DRAWER_GUTTER, DRAWER_INDENT, GLYPH, GUTTER, MARK, NOTE_GLYPH, ROW_GAP, SELECTED, STRUCT, pill, struct } from './theme.ts'
 
 export * from './theme.ts'
 
@@ -40,7 +40,7 @@ export function Row({ kit, left, leftBlock, right, rightBlock, shrink = 'left' }
       ) : (
         left !== undefined && (
           <Box flexShrink={isLeftShrinking ? 1 : 0}>
-            <Text wrap="truncate-end">{left}</Text>
+            <Text color={TEXT} wrap="truncate-end">{left}</Text>
           </Box>
         )
       )}
@@ -50,7 +50,7 @@ export function Row({ kit, left, leftBlock, right, rightBlock, shrink = 'left' }
       ) : (
         right !== undefined && (
           <Box flexShrink={isLeftShrinking ? 0 : 1}>
-            <Text wrap="truncate-end">{right}</Text>
+            <Text color={TEXT} wrap="truncate-end">{right}</Text>
           </Box>
         )
       )}
@@ -100,14 +100,14 @@ export function Field({ kit, label, isSection = false, mark, markColor, labelCol
       <Box width={labelWidth} flexShrink={0} flexDirection="row">
         {mark !== undefined && (
           <Box width={MARK} flexShrink={0} flexDirection="row" justifyContent="flex-end">
-            <Text color={markColor} dimColor={markColor === undefined}>
+            <Text color={markColor ?? QUIET}>
               {mark}
             </Text>
           </Box>
         )}
         {/* A block's bar takes the structure hue; its word stays default text. */}
         {isSection && <Text color={STRUCT.bar}>{`${GLYPH.section} `}</Text>}
-        <Text color={labelColor} dimColor={labelColor === undefined} bold={isLabelBold ?? labelColor !== undefined} wrap="truncate-end" {...(labelHover !== undefined && { hover: labelHover })}>
+        <Text color={labelColor ?? QUIET} bold={isLabelBold ?? labelColor !== undefined} wrap="truncate-end" {...(labelHover !== undefined && { hover: labelHover })}>
           {label}
         </Text>
       </Box>
@@ -126,12 +126,13 @@ export const badgeHue = (opType: OpType | undefined): string => BADGE_HUE[opType
  * red, WATCH teal); settled, the word bold in its hue with the pill's
  * spacing, so it keeps its place and shape but stops shouting.
  */
-export function Badge({ kit, opType, isSettled, hover }: { kit: Kit; opType: OpType | undefined; isSettled: boolean; hover?: TextHoverProps }) {
+export function Badge({ kit, opType, isSettled, hover, word: given, hue: givenHue }: { kit: Kit; opType: OpType | undefined; isSettled: boolean; hover?: TextHoverProps; word?: string; hue?: string }) {
   const { Text } = kit
-  const word = opType === undefined ? '?' : BADGE[opType]
-  const hue = badgeHue(opType)
+  // A lookup's own word and hue (src/view/kinds.ts badgeOf); an execute's from its operation type.
+  const word = given ?? (opType === undefined ? '?' : BADGE[opType])
+  const hue = givenHue ?? badgeHue(opType)
   const lit = hover === undefined ? {} : { hover }
-  if (isSettled) return <Text {...struct(hue, true, { bold: true })} {...lit}>{` ${word} `}</Text>
+  if (isSettled) return <Text {...struct(hue === SELECTED ? TEXT : hue, true, { bold: true })} {...lit}>{` ${word} `}</Text>
   return <Text {...pill(hue)} {...lit}>{` ${word} `}</Text>
 }
 
@@ -156,12 +157,12 @@ export function PolicyMeter({ kit, counts, isDim, hover }: { kit: Kit; counts: {
   if (cells === undefined) return null
   const run = (count: number, glyph: string, color: string | undefined) =>
     count > 0 && (
-      <Text color={color} dimColor={color === undefined}>
+      <Text color={color ?? QUIET}>
         {glyph.repeat(count)}
       </Text>
     )
   return (
-    <Text {...(hover !== undefined && { hover })}>
+    <Text color={TEXT} {...(hover !== undefined && { hover })}>
       {run(cells.allow, GLYPH.meterOn, COLOR.allow)}
       {run(cells.mask, GLYPH.meterOn, COLOR.mask)}
       {run(cells.deny, GLYPH.meterOn, COLOR.deny)}
@@ -182,7 +183,7 @@ export function Counts({ kit, counts, isDim }: { kit: Kit; counts: { allow: numb
     counts.mask > 0 && <Text {...struct(COLOR.mask, isDim)}>{`${GLYPH.mask} ${counts.mask}`}</Text>,
     counts.deny > 0 && <PolicyChip kit={kit} kind="deny" count={counts.deny} isDim={isDim} />,
   ].filter(part => part !== false)
-  return <Text>{parts.flatMap((part, index) => (index === 0 ? [part] : [' ', part]))}</Text>
+  return <Text color={TEXT}>{parts.flatMap((part, index) => (index === 0 ? [part] : [' ', part]))}</Text>
 }
 
 /**
@@ -199,9 +200,9 @@ export function AllAllowed({ kit, counts, isAll = true, isLong = true, isWrite =
   const isChecked = isWrite || (isAll && (counts.unknown ?? 0) === 0)
   const shown = isWrite ? writeAllowedShown(isLong) : allowedShown(counts, isAll, isLong)
   return (
-    <Text {...(hover !== undefined && { hover })}>
+    <Text color={TEXT} {...(hover !== undefined && { hover })}>
       {isChecked && <Text color={COLOR.allow}>{GLYPH.allow}</Text>}
-      <Text dimColor>{isChecked ? shown.slice(GLYPH.allow.length) : shown}</Text>
+      <Text color={QUIET}>{isChecked ? shown.slice(GLYPH.allow.length) : shown}</Text>
     </Text>
   )
 }
@@ -220,17 +221,17 @@ export const NEEDS_SIGN_IN = 'needs sign-in'
  * Pending: no status word, only `1 of N` when queued. Settled: the outcome
  * glyph keeps its color (✓ success, ✕ / ! error) and the word goes dim.
  */
-export function Status({ kit, status, waiting, outcome, hover }: { kit: Kit; status: CallStatus; waiting: number; outcome?: CallOutcome | undefined; hover?: TextHoverProps }) {
+export function Status({ kit, status, waiting, outcome, hover, shown: given }: { kit: Kit; status: CallStatus; waiting: number; outcome?: CallOutcome | undefined; hover?: TextHoverProps; shown?: { glyph: string; word: string; color: string } | undefined }) {
   const { Text } = kit
-  const shown = statusOf(status, waiting, outcome)
+  const shown = given ?? statusOf(status, waiting, outcome)
   if (shown === undefined) return null
   const lit = hover === undefined ? {} : { hover }
   if (shown.glyph === '') return <Text color={COLOR.pending} {...lit}>{shown.word}</Text>
   return (
-    <Text {...lit}>
+    <Text color={TEXT} {...lit}>
       <Text color={shown.color}>{`${shown.glyph} `}</Text>
       {/* The word alone in its Text, so a reader (and a test) finds exactly `ran`. */}
-      <Text dimColor>{shown.word}</Text>
+      <Text color={QUIET}>{shown.word}</Text>
     </Text>
   )
 }
@@ -266,23 +267,25 @@ export function statusOf(status: CallStatus, waiting: number, outcome?: CallOutc
 }
 
 /** A glyph, then text that wraps with a hanging indent under the text, not the glyph. */
-export function Note({ kit, glyph, color, isDim, children }: {
+export function Note({ kit, glyph, color, isDim, hover, children }: {
   kit: Kit
   glyph: string
   color?: string
   isDim?: boolean
+  /** The card the note's text lights, when it has more to say. */
+  hover?: TextHoverProps
   children?: RenderChildren
 }) {
   const { Box, Text } = kit
   return (
     <Box flexDirection="row">
       <Box width={NOTE_GLYPH} flexShrink={0}>
-        <Text color={color} bold={color !== undefined && isDim !== true} dimColor={isDim}>
+        <Text color={color ?? (isDim ? QUIET : TEXT)} bold={color !== undefined && isDim !== true}>
           {glyph}
         </Text>
       </Box>
       <Box flexGrow={1} flexShrink={1}>
-        <Text wrap="wrap" dimColor={isDim}>
+        <Text wrap="wrap" color={isDim ? QUIET : TEXT} {...(hover !== undefined && { hover })}>
           {children}
         </Text>
       </Box>
@@ -300,7 +303,7 @@ export function Drawer({ kit, title, marginTop = 0, children }: { kit: Kit; titl
   return (
     <Box flexDirection="column" marginTop={marginTop}>
       {title !== undefined && (
-        <Text dimColor wrap="wrap">
+        <Text color={QUIET} wrap="wrap">
           {GLYPH.open} {title}
         </Text>
       )}
@@ -317,7 +320,7 @@ export function Bullet({ kit, glyph = GLYPH.bullet, color, children }: { kit: Ki
   return (
     <Box flexDirection="row">
       <Box width={BULLET} flexShrink={0}>
-        <Text color={color} dimColor={color === undefined}>{glyph}</Text>
+        <Text color={color ?? QUIET}>{glyph}</Text>
       </Box>
       <Box flexDirection="column" flexGrow={1} flexShrink={1}>
         {children}

@@ -4,19 +4,37 @@ This guide covers the parts of GraphOS Inspector that benefit from more detail t
 
 ## Reading a call
 
-The pane appears beside the permission dialog when the terminal is wide enough; `/gas` opens it at any width. A transcript verdict remains under the call after the pane closes. The pane identifies the operation and services, shows arguments and selected fields, and annotates fields with schema information and Agent Services policy results when those checks are available. A write's verdict summarizes its target and proposed action before policy checks finish. The pane also identifies calls made by a known subagent or another plugin.
+The pane opens beside the first permission dialog of a session for any Agent Services call when the terminal is wide enough; a call that runs without a dialog never opens it, and a pane you close stays closed. `/gas` opens it at any width. A transcript verdict remains under the call after the pane closes. The pane identifies the operation and services, shows arguments and selected fields, and annotates fields with schema information and Agent Services policy results when those checks are available. A write's verdict summarizes its target and proposed action before policy checks finish. The pane also identifies calls made by a known subagent or another plugin.
 
-The headline is a short description of the operation. It is requested only when needed; it may be reused from cache. The pane's flags call out policy denials, query fields whose names suggest a write, results larger than requested limits, and unusually large fields.
+The AI summary is a short description of the operation, separate from check results and execution evidence. It is requested only when needed; it may be reused from cache. Before execution, the pane calls out reported access restrictions and consequential inputs. After execution, its flags describe observed denials, query fields whose names suggest a write, results larger than requested limits, and unusually large fields.
 
 After a readable response arrives, RESULT shows a compact preview of its rows, paging information, and links where available. Lists open with a few rows and can expand to show up to 25; a row can be expanded to inspect its fields. Links can open records or the corresponding Jira, Confluence, or Glean search; Slack messages link to their permalink. The transcript also gets a compact result block for scrollback and narrow terminals. Calls that were refused, failed, or whose result could not be read have no result block.
 
-Hover cards explain names, arguments, types, descriptions, paging, policy, scopes, and returned values. A context receipt estimates the response's size from its compact JSON representation in UTF-8 bytes. The token figure is a rough estimate using bytes divided by four; it is not a token count or a measurement of Claude's actual context. The receipt can identify large fields and estimate the response size without them. A response Claude Code saves outside the conversation is measured from its saved file when readable, otherwise from the size Claude Code reported.
+Hover cards give compact previews. Once a call settles, focus a name with Tab and press Enter, or click it, to expand its complete retained details inline. Opening Inspector also makes a separate Raw tab available; it follows the same selected history entry. Large inputs are available in that paginated pane; use `p`/`n` between parts and `s` to switch between normalized GraphQL and the operation as sent. Very long source lines render as plain text to avoid the host highlighter's truncation. Lookup raw views show the original tool input. A context receipt estimates the response's size from its compact JSON representation in UTF-8 bytes. The token figure is a rough estimate using bytes divided by four; it is not a token count or a measurement of Claude's actual context. The receipt can identify large fields and estimate the response size without them. A response Claude Code saves outside the conversation is measured from its saved file when readable, otherwise from the size Claude Code reported.
 
-The standing line, when present, counts Agent Services calls, response bytes read, loaded trust rules, and calls that ran without asking because a trust rule matched. A call allowed by Claude Code settings is not counted as trust-rule execution.
+**Checks** explains what evidence the Inspector has for schema information, validation, and access. Hover for a compact explanation; after the call settles, focus Checks with Tab and press Enter for the complete retained context. The same information is included under `d: details`. Background checks honor existing Claude Code permissions and never open an extra permission dialog. If inspection evidence is missing, that alone says nothing about whether the service enforced access controls. Older history may have no retained cause; the Inspector does not guess one or rerun the call.
+
+A policy check is a preview for the checked operation and service, not a guarantee of a later result. A completed operation reports what actually returned. An interrupted entry means the Inspector stopped waiting and does not know whether execution completed. A JSON scalar is selected as one GraphQL value: its internal payload keys are not separately selectable GraphQL fields, even when a service-specific argument requests only certain keys.
+
 
 When a call runs without a permission dialog, its spinner can show the headline while it is available. A field denied by Agent Services may offer an access-request draft; the draft is placed in the prompt box for you to review and send.
 
 While a permission dialog is open, pane controls are inactive and the transcript verdict continues to update. Claude Code may run a call without a dialog in auto mode; trust rules apply only when its permission check returns `ask`.
+
+## Searches and checks
+
+Claude's own `search`, `introspect`, `validate`, and `dry_run` calls show in the same pane, each with its badge (SEARCH, INTROSPECT, VALIDATE, DRY RUN) and its own layout:
+
+- **search** lists five candidates in server order, with service, purpose, required inputs, and return type. Expand for more candidates or inspect an operation for optional arguments and defaults. A search with no terms lists the services the graph reaches.
+- **introspect** shows the type Claude read: its description and its fields, or an enum's values.
+- **validate** shows the operation Claude checked and, when it is invalid, the problems Agent Services reported; complete diagnostics are available through inline details. A missing answer is distinct from a reported invalid operation.
+- **dry_run** shows each request's operation with every field's policy decision: allowed, masked, or denied. A request Agent Services could not check says why.
+
+Open `/gas` before a task to watch Claude's discovery and checks as they happen. After a readable lookup answer arrives, Haiku explains its meaning; the factual headline remains while the helper works or if it fails. Introspection initially shows up to twelve fields or members, with an explicit expansion for the remainder. Names expose schema descriptions and deprecation details where available. Counts distinguish complete observations from partial responses; a local parsing limit is reported as unavailable detail, never as proof that a type does not exist.
+
+Lookup details include the answer size and a rough token estimate. Every lookup gets a verdict line under its transcript row, also inside a folded group of calls.
+
+Lookups never change a permission decision: trust rules apply only to `execute`. An `execute` waiting at its dialog stays in the pane while Claude searches beside it, and a lookup does not move you off a past call you stepped back to. History retains up to 128 calls across execute and lookup tools, reserving a place for the call you are inspecting. Opening details pins that call while background work continues. A new permission dialog switches the pane to the request being approved. For a validate or a dry_run, the inspector reads the schema (with its own cached `search` and `introspect` calls, when allowed) to add descriptions and types; those reads never appear as entries.
 
 ## Write previews
 
@@ -63,7 +81,7 @@ Write-name detection is conservative: an underscore-separated read name containi
 
 Nested different type conditions on the same value, such as `... on JiraIssue { ... on Node { id } }`, require approval and cannot be used in trust rules. Repeating the same type condition or selecting a different type beneath a child field is supported.
 
-A saved file is loaded at session start, when `/gas trust` runs, or when the plugin reloads. Saving the file alone does not change in-memory rules; the inspector reports that the file changed. A call that does not fit a rule still asks as usual. Use `/gas trust off` and `/gas trust on` to disable and re-enable rules for the current session.
+A saved file is loaded at session start, when `/gas trust` runs, or when the plugin reloads. Saving the file alone does not change in-memory rules; the inspector reports that the file changed. A call that does not fit a rule keeps Claude Code's existing permission decision. Use `/gas trust off` and `/gas trust on` to disable and re-enable Inspector rules for the current session; this does not change Claude Code's own allow or deny settings.
 
 ## Sites and links
 
@@ -98,13 +116,13 @@ The file accepts a strict TOML subset: tables, arrays of tables, strings, boolea
 
 The inspector follows the claude.ai GraphOS Agent Services connector only, by its server name (`claude_ai_GraphOS_Agent_Services`). Its hooks match that server's tools alone, so calls to any other MCP server never reach the plugin.
 
-`/gas setup` checks the Claude Code version and the connector, and notes whether the read-only Agent Services tools are allowed; allowing them is optional. When `search` is allowed, it may call `search` to identify which supported services are present and draft a read-only question that can teach the inspector your Jira/Confluence site or Slack workspace. You review and send that prompt yourself.
+`/gas setup` checks the Claude Code version and the connector, and notes whether the read-only Agent Services tools are allowed; allowing them is optional. In a Desktop Code Local session, `/status` shows the version of the app's own Claude Code engine, which may differ from the shell CLI. Update the Desktop app and start a new session if it is older than 2.1.290. In terminal Claude Code, check `claude --version` and use `claude update` if needed. For optional read-only tool permissions, `/permissions` works in terminal Claude Code; Desktop Code users can use the shared `~/.claude/settings.json` or the standalone CLI. When `search` is allowed, setup may call it to identify which supported services are present and draft a read-only question that can teach the inspector your Jira/Confluence site or Slack workspace. You review and send that prompt yourself.
 
 For an eligible `execute` call, the inspector can call Agent Services' read-only `validate`, `dry_run`, `search`, and `introspect` tools while the permission dialog is open. The checks are only made when your settings allow the tools. Schema lookups are cached for the session. If services are added during a session, reload the plugin to refresh the service catalog. The inspector never calls `execute` or performs a write itself.
 
-For a new headline, Haiku receives the parsed operation structure, its argument values (each capped at 2,000 characters), and schema descriptions through your Claude Code sign-in. It does not receive the response. The request is best-effort and may be skipped or reused from cache. It can run while the permission dialog is open, including before you refuse the call. The pane computes the policy and verdict from the operation and Agent Services checks.
+For a new headline, Haiku receives the parsed operation structure, its argument values (each capped at 2,000 characters), and schema descriptions through Claude Code's existing credentials. Lookup explanations also include bounded search terms, type names, declared members, and catalog facts. Execution results and access-request tokens are excluded. A Claude subscription needs no separate API key; helper calls count toward that plan's usage. API-key and provider sessions use their configured billing. The request is best-effort and may be skipped or reused from cache. An execute headline can run while the permission dialog is open, including before you refuse the call. Lookup headlines run after the schema/check answer arrives. The pane computes policy and verdicts independently.
 
-Sites learned from Agent Services responses are stored with Claude Code for the plugin. The pane keeps the last 20 calls in session memory. The plugin writes no user config file. Access requests and setup questions are drafts in the prompt box; nothing is sent until you choose to submit it. Nothing else leaves your machine: the plugin has no telemetry.
+Sites learned from Agent Services responses are stored with Claude Code for the plugin. History stores compact overview records; complete inspected inputs, schema details, and bounded result previews live in host session state, separately from those overviews. The detail cache is capped at 16 MiB of serialized UTF-8 data, 2 MiB per call, and 128 entries. Selected calls and the active permission call are protected from ordinary eviction. Details survive plugin code reloads and are cleared when the session ends. Expiration and oversize inputs leave explicit unavailable-detail messages; the inspector does not rerun a call to recover them or automatically save them to disk. These budgets describe retained serialized data, not total process memory. Observation runs asynchronously: tool execution and answers do not wait for the Inspector. Details and linked result rows can appear shortly afterwards. If an inspection step stalls, the Inspector pauses admission of new calls, shows a diagnostic, and resumes after storage or analysis recovers. Calls skipped during that pause are not replayed. Optional trust evaluation has a one-second total deadline; if it cannot verify a match in time, the original permission decision stands. The plugin writes no user config file. Access requests and setup questions are drafts in the prompt box; nothing is sent until you choose to submit it. The plugin has no telemetry. Its own outgoing requests are the permitted read-only Agent Services checks and Haiku helper calls described above; opening a record link contacts its site.
 
 ## Commands
 
@@ -112,7 +130,7 @@ Sites learned from Agent Services responses are stored with Claude Code for the 
 |---|---|
 | `/gas` | Open the current or last call; Esc returns keys to Claude Code, `×` or `ctrl+x x` closes the pane |
 | `/gas setup` | Check setup and show numbered next steps |
-| `/gas older`, `/gas newer`, `/gas live` | Browse the last 20 calls |
+| `/gas older`, `/gas newer`, `/gas live` | Browse recent calls and lookups |
 | `/gas raw` | Toggle the raw operation and variables |
 | `/gas trust` | Reload and list rules; report skipped entries |
 | `/gas trust off`, `/gas trust on` | Disable or enable trust rules for this session |
@@ -123,7 +141,7 @@ The `/gas snapshot`, `/gas snapshots on|off`, and `/gas timing on|off` commands 
 
 ## Updating the plugin
 
-In Claude Code, run `/plugin`, open **Marketplaces**, select `graphos-experiments`, choose **Update marketplace**, then run `/reload-plugins`. From a shell, run:
+In terminal Claude Code, run `/plugin`, open **Marketplaces**, select `graphos-experiments`, choose **Update marketplace**, then run `/reload-plugins`. For Desktop Code, update from a shell on the same computer, then start a new Local session:
 
 ```sh
 claude plugin marketplace update graphos-experiments

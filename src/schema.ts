@@ -6,6 +6,7 @@
 
 import { Kind, parse, print } from './vendor/graphql.js'
 import type { DirectiveNode, StringValueNode, TypeNode } from './vendor/graphql.js'
+import type { LookupFound } from './ir.ts'
 
 export type FieldDef = {
   name: string
@@ -47,7 +48,42 @@ export type ArgDef = {
 /** Type name → field name → definition. Snippets of the same type merge. */
 export type SchemaIndex = Map<string, Map<string, FieldDef>>
 
+type TypeKind = Exclude<LookupFound['typeKind'], 'absent' | 'unavailable' | undefined>
+const TYPE_KINDS = new WeakMap<SchemaIndex, Map<string, TypeKind>>()
+const UNIONS = new WeakMap<SchemaIndex, Map<string, string[]>>()
+
+/** Declarations are evidence of existence even when a type has no fields. */
+export function typeKindsOf(index: SchemaIndex): Map<string, TypeKind> {
+  let found = TYPE_KINDS.get(index)
+  if (found === undefined) {
+    found = new Map()
+    TYPE_KINDS.set(index, found)
+  }
+  return found
+}
+
+/** Union type name → its possible object types, including merged extensions. */
+export function unionsOf(index: SchemaIndex): Map<string, string[]> {
+  let found = UNIONS.get(index)
+  if (found === undefined) {
+    found = new Map()
+    UNIONS.set(index, found)
+  }
+  return found
+}
+
 const ENUMS = new WeakMap<SchemaIndex, Map<string, string[]>>()
+const MEMBER_DETAILS = new WeakMap<SchemaIndex, Map<string, Map<string, NonNullable<LookupFound['memberDetails']>[number]>>>()
+
+/** Enum values and input fields retain their own prose, not their parent's description. */
+export function memberDetailsOf(index: SchemaIndex): Map<string, Map<string, NonNullable<LookupFound['memberDetails']>[number]>> {
+  let found = MEMBER_DETAILS.get(index)
+  if (found === undefined) {
+    found = new Map()
+    MEMBER_DETAILS.set(index, found)
+  }
+  return found
+}
 
 /** Enum type name → its values, for every enum `indexSdl` saw into this index. */
 export function enumsOf(index: SchemaIndex): Map<string, string[]> {
@@ -55,6 +91,30 @@ export function enumsOf(index: SchemaIndex): Map<string, string[]> {
   if (found === undefined) {
     found = new Map()
     ENUMS.set(index, found)
+  }
+  return found
+}
+
+const INPUTS = new WeakMap<SchemaIndex, Map<string, string[]>>()
+
+/** Input object type name → `field: Type` for each of its fields, for every input `indexSdl` saw into this index. */
+export function inputsOf(index: SchemaIndex): Map<string, string[]> {
+  let found = INPUTS.get(index)
+  if (found === undefined) {
+    found = new Map()
+    INPUTS.set(index, found)
+  }
+  return found
+}
+
+const TYPE_TEXT = new WeakMap<SchemaIndex, Map<string, string>>()
+
+/** Type name → its own description, for every type `indexSdl` saw into this index. Untrusted schema text. */
+export function typeDescriptionsOf(index: SchemaIndex): Map<string, string> {
+  let found = TYPE_TEXT.get(index)
+  if (found === undefined) {
+    found = new Map()
+    TYPE_TEXT.set(index, found)
   }
   return found
 }
@@ -145,20 +205,65 @@ function deprecationOf(directives: readonly DirectiveNode[] | undefined): string
 }
 
 /** Indexes every object and interface type in `sdls`; a string that does not parse is skipped. */
-export function indexSdl(sdls: readonly string[], into: SchemaIndex = new Map()): SchemaIndex {
+export function indexSdl(sdls: readonly string[], into: SchemaIndex = new Map(), report?: { parsed: number; failed: number }): SchemaIndex {
   for (const sdl of sdls) {
     let document
     try {
       document = parse(sdl, { noLocation: true })
     } catch {
+      if (report !== undefined) report.failed++
       continue
     }
+    // Executable documents are valid GraphQL, but not evidence of a complete SDL answer.
+    if (document.definitions.some(definition => definition.kind === Kind.OPERATION_DEFINITION || definition.kind === Kind.FRAGMENT_DEFINITION)) {
+      if (report !== undefined) report.failed++
+    } else if (report !== undefined) report.parsed++
     for (const definition of document.definitions) {
+      let kind: TypeKind | undefined
+      switch (definition.kind) {
+        case Kind.OBJECT_TYPE_DEFINITION: case Kind.OBJECT_TYPE_EXTENSION: kind = 'object'; break
+        case Kind.INTERFACE_TYPE_DEFINITION: case Kind.INTERFACE_TYPE_EXTENSION: kind = 'interface'; break
+        case Kind.INPUT_OBJECT_TYPE_DEFINITION: case Kind.INPUT_OBJECT_TYPE_EXTENSION: kind = 'input'; break
+        case Kind.ENUM_TYPE_DEFINITION: case Kind.ENUM_TYPE_EXTENSION: kind = 'enum'; break
+        case Kind.SCALAR_TYPE_DEFINITION: case Kind.SCALAR_TYPE_EXTENSION: kind = 'scalar'; break
+        case Kind.UNION_TYPE_DEFINITION: case Kind.UNION_TYPE_EXTENSION: kind = 'union'; break
+      }
+      if (kind !== undefined && 'name' in definition && definition.name !== undefined) typeKindsOf(into).set(definition.name.value, kind)
+      if ('description' in definition && definition.description !== undefined && 'name' in definition && definition.name !== undefined) {
+        typeDescriptionsOf(into).set(definition.name.value, definition.description.value)
+      }
+      if (definition.kind === Kind.INPUT_OBJECT_TYPE_DEFINITION || definition.kind === Kind.INPUT_OBJECT_TYPE_EXTENSION) {
+        const inputs = inputsOf(into)
+        const fields = inputs.get(definition.name.value) ?? []
+        const details = memberDetailsOf(into).get(definition.name.value) ?? new Map()
+        for (const field of definition.fields ?? []) {
+          const line = `${field.name.value}: ${print(field.type)}${field.defaultValue === undefined ? '' : ` = ${print(field.defaultValue)}`}`
+          if (!fields.includes(line)) fields.push(line)
+          const deprecated = deprecationOf(field.directives)
+          details.set(line, { name: field.name.value, ...(field.description !== undefined && { description: field.description.value }), ...(deprecated !== undefined && { deprecated }) })
+        }
+        memberDetailsOf(into).set(definition.name.value, details)
+        inputs.set(definition.name.value, fields)
+        continue
+      }
       if (definition.kind === Kind.ENUM_TYPE_DEFINITION || definition.kind === Kind.ENUM_TYPE_EXTENSION) {
         const enums = enumsOf(into)
         const values = enums.get(definition.name.value) ?? []
-        for (const value of definition.values ?? []) if (!values.includes(value.name.value)) values.push(value.name.value)
+        const details = memberDetailsOf(into).get(definition.name.value) ?? new Map()
+        for (const value of definition.values ?? []) {
+          if (!values.includes(value.name.value)) values.push(value.name.value)
+          const deprecated = deprecationOf(value.directives)
+          details.set(value.name.value, { name: value.name.value, ...(value.description !== undefined && { description: value.description.value }), ...(deprecated !== undefined && { deprecated }) })
+        }
+        memberDetailsOf(into).set(definition.name.value, details)
         enums.set(definition.name.value, values)
+        continue
+      }
+      if (definition.kind === Kind.UNION_TYPE_DEFINITION || definition.kind === Kind.UNION_TYPE_EXTENSION) {
+        const unions = unionsOf(into)
+        const members = unions.get(definition.name.value) ?? []
+        for (const member of definition.types ?? []) if (!members.includes(member.name.value)) members.push(member.name.value)
+        unions.set(definition.name.value, members)
         continue
       }
       const isObject =

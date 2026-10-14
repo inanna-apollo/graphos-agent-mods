@@ -114,7 +114,7 @@ test('RESULT scalars: echoes and nulls are hidden, the more flag reads in words'
   assert.deepEqual(shownScalars(outcome, ir).map(one => one.field), ['more'])
   const lines = resultLines(outcome, ir)
   // Count, then the items in words, by number: one row is `1 item`.
-  assert.deepEqual(lines.find(line => line.kind === 'rows'), { kind: 'rows', field: '', text: '1 item', note: 'first page · more available' })
+  assert.deepEqual(lines.find(line => line.kind === 'rows'), { kind: 'rows', field: '', text: '1 item', note: 'first page requested · more available' })
   assert.ok(!lines.some(line => line.kind === 'scalar'))
   // A described echo is hidden whatever its value; an undescribed offset of 0 that was never set is one too.
   const other = outcomeOf(ir, mcp({ data: { pd_list: { items: [], limit: 10, offset: 0 } } }))

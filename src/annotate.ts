@@ -5,8 +5,8 @@
 // (response keys, so aliases), schema by the real name under its parent type.
 
 import type { Access } from './gas.ts'
-import type { ArgIR, CallIR, CallState, Checks, FieldIR, OmittedArg, OpType, Paging, Validation } from './ir.ts'
-import { enumsOf, hintsFrom, scopesFrom } from './schema.ts'
+import type { ArgIR, CallIR, CallState, Checks, FieldIR, FieldSchema, OmittedArg, OpType, Paging, Validation } from './ir.ts'
+import { enumsOf, hintsFrom, inputsOf, scopesFrom } from './schema.ts'
 import type { FieldDef, SchemaIndex } from './schema.ts'
 
 const ROOT_TYPE: Record<OpType, string> = { query: 'Query', mutation: 'Mutation', subscription: 'Subscription' }
@@ -107,17 +107,80 @@ function annotateArg(arg: ArgIR, def: FieldDef | undefined, schema: SchemaIndex 
   }
 }
 
-function omittedOf(field: FieldIR, def: FieldDef): OmittedArg[] {
+/** How many values or fields of an argument's type an omitted argument's card lists. */
+const TYPE_PARTS_MAX = 40
+
+function omittedOf(field: FieldIR, def: FieldDef, schema: SchemaIndex | undefined): OmittedArg[] {
   const set = new Set(field.args.map(arg => arg.name))
   return Object.values(def.argDefs)
     .filter(arg => !set.has(arg.name))
-    .map(arg => ({
-      name: arg.name,
-      type: arg.type,
-      ...(arg.defaultValue !== undefined && { default: arg.defaultValue }),
-      ...(arg.description !== undefined && { description: arg.description }),
-      isRequired: arg.type.endsWith('!') && arg.defaultValue === undefined,
-    }))
+    .map(arg => {
+      const enumValues = schema === undefined ? undefined : enumsOf(schema).get(arg.namedType)
+      const inputFields = schema === undefined ? undefined : inputsOf(schema).get(arg.namedType)
+      return {
+        name: arg.name,
+        type: arg.type,
+        ...(arg.defaultValue !== undefined && { default: arg.defaultValue }),
+        ...(arg.description !== undefined && { description: arg.description }),
+        isRequired: arg.type.endsWith('!') && arg.defaultValue === undefined,
+        ...(enumValues !== undefined && enumValues.length > 0 && { enumValues: enumValues.slice(0, TYPE_PARTS_MAX) }),
+        ...(inputFields !== undefined && inputFields.length > 0 && { inputFields: inputFields.slice(0, TYPE_PARTS_MAX) }),
+      }
+    })
+}
+
+/** What a field's definition says of it, as a FieldIR keeps it. */
+export function schemaFacts(def: FieldDef): FieldSchema {
+  const hints = hintsFrom(def.description)
+  return {
+    type: def.type,
+    isList: def.isList,
+    isNonNull: def.isNonNull,
+    isListItemNonNull: def.isListItemNonNull,
+    isListNonNull: def.isListNonNull,
+    ...(hints.length > 0 && { hints }),
+    ...(def.description !== undefined && { description: def.description }),
+    ...(def.deprecated !== undefined && { deprecated: def.deprecated }),
+    scopes: scopesFrom(def.description),
+    tags: def.tags,
+    ...(def.requiresInclude !== undefined && { requiresInclude: def.requiresInclude }),
+    ...(def.isOpaque === true && { isOpaque: true }),
+  }
+}
+
+export type DefOptions = {
+  /** Levels of the return type's fields to include under the field (0: none). */
+  depth: number
+  /** Fields kept per object; the rest are left out. */
+  maxChildren: number
+  /** On a root: the service it belongs to. */
+  service?: string
+  isRoot?: boolean
+}
+
+/**
+ * A field as the schema declares it, not as a call selected it: every
+ * declared argument as one left unset, and its return type's fields to
+ * `depth` levels (a type already on the path is not entered again). Policy
+ * is unknown: no call was checked. What a search or an introspect returned
+ * is drawn with these.
+ */
+export function fieldOfDef(def: FieldDef, owner: string, path: string, schema: SchemaIndex, options: DefOptions, seen: ReadonlySet<string> = new Set()): FieldIR {
+  const bare: FieldIR = { name: def.name, coordinate: `${owner}.${def.name}`, path, args: [], policy: 'unknown', children: [] }
+  const inner = schema.get(def.namedType)
+  const isEntered = options.depth > 0 && inner !== undefined && !seen.has(def.namedType) && def.isOpaque !== true
+  const below = new Set([...seen, def.namedType])
+  const children = isEntered ? [...inner.values()].slice(0, options.maxChildren).map(child => fieldOfDef(child, def.namedType, `${path}.${child.name}`, schema, { ...options, depth: options.depth - 1, isRoot: false }, below)) : []
+  const omittedArgs = omittedOf(bare, def, schema)
+  const paging = options.isRoot === true ? pagingOf(bare, def, schema) : undefined
+  return {
+    ...bare,
+    ...(options.service !== undefined && { service: options.service }),
+    ...(omittedArgs.length > 0 && { omittedArgs }),
+    ...(paging !== undefined && { paging }),
+    schema: schemaFacts(def),
+    children,
+  }
 }
 
 function annotateField(field: FieldIR, parentType: string | undefined, found: Enrichment, isRoot = false): FieldIR {
@@ -127,8 +190,6 @@ function annotateField(field: FieldIR, parentType: string | undefined, found: En
   const base: FieldIR = field.onType !== undefined && field.onType === parentType ? bare : field
   const def = owner === undefined ? undefined : found.schema?.get(owner)?.get(field.name)
   const decision = found.access?.fields.get(field.path)
-  const scopes = scopesFrom(def?.description)
-  const hints = hintsFrom(def?.description)
   const paging = isRoot && def !== undefined && found.schema !== undefined ? pagingOf(field, def, found.schema) : undefined
   const service = isRoot ? found.rootScopes?.get(field.path) : undefined
   return {
@@ -136,24 +197,9 @@ function annotateField(field: FieldIR, parentType: string | undefined, found: En
     ...(service !== undefined && { service }),
     coordinate: owner === undefined ? field.name : `${owner}.${field.name}`,
     args: field.args.map(arg => annotateArg(arg, def, found.schema)),
-    ...(def !== undefined && Object.keys(def.argDefs).length > 0 && { omittedArgs: omittedOf(field, def) }),
+    ...(def !== undefined && Object.keys(def.argDefs).length > 0 && { omittedArgs: omittedOf(field, def, found.schema) }),
     ...(paging !== undefined && { paging }),
-    ...(def !== undefined && {
-      schema: {
-        type: def.type,
-        isList: def.isList,
-        isNonNull: def.isNonNull,
-        isListItemNonNull: def.isListItemNonNull,
-        isListNonNull: def.isListNonNull,
-        ...(hints.length > 0 && { hints }),
-        ...(def.description !== undefined && { description: def.description }),
-        ...(def.deprecated !== undefined && { deprecated: def.deprecated }),
-        scopes,
-        tags: def.tags,
-        ...(def.requiresInclude !== undefined && { requiresInclude: def.requiresInclude }),
-        ...(def.isOpaque === true && { isOpaque: true }),
-      },
-    }),
+    ...(def !== undefined && { schema: schemaFacts(def) }),
     policy: decision?.decision ?? 'unknown',
     ...(decision?.denialContext !== undefined && { denialContext: decision.denialContext }),
     children: field.children.map(child => annotateField(child, def?.namedType, found)),
@@ -174,7 +220,7 @@ export function annotate(ir: CallIR, found: Enrichment): CallIR {
     ...(found.checks !== undefined && { checks: found.checks }),
     ...(found.access !== undefined && { isOperationDenied: found.access.denyOperation }),
     state,
-    roots: ir.roots.map(root => annotateField(root, rootType, found, true)),
+    roots: ir.roots.map(root => annotateField(root, root.request === undefined ? rootType : ROOT_TYPE[root.request.opType], found, true)),
   }
 }
 

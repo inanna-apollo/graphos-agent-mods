@@ -64,6 +64,10 @@ export type OmittedArg = {
   description?: string
   /** Non-null with no default: the call would fail without it. */
   isRequired: boolean
+  /** Values of its named type when that is an enum the SDL defines (at most 40). */
+  enumValues?: string[]
+  /** `name: Type` for each field of its named type when that is an input object the SDL defines (at most 40). */
+  inputFields?: string[]
 }
 
 /** How a list-returning root pages, from argument and response-field names. */
@@ -88,6 +92,8 @@ export type FieldIR = {
   alias?: string
   /** On a root: the Agent Services scope it was checked against. */
   service?: string
+  /** On a dry_run root: its original request's zero-based position and operation kind. Absent in older stored calls. */
+  request?: { index: number; opType: OpType }
   /** `Parent.field` once the parent type is known, else the bare name. */
   coordinate: string
   /** The dry_run path: response keys (alias ?? name) joined by dots. */
@@ -125,10 +131,33 @@ export type Summary = {
 
 /** How one enrichment check went, so the pane can say why something is unknown. */
 export type CheckOutcome = 'ok' | 'not-allowed' | 'failed' | 'skipped'
+export type CheckTarget =
+  | { kind: 'call' }
+  | { kind: 'scope'; scope: string; opType?: OpType }
+  | { kind: 'request'; scope: string; index: number }
+  | { kind: 'root'; path: string }
+
+/** Bounded evidence about one check, not the execution result or permission to run it. */
+export type CheckContext = {
+  check: 'policy' | 'validation' | 'schema'
+  target: CheckTarget
+  source: 'enrichment' | 'tool-response'
+  /** The short tool name when the evidence identifies it; never an MCP tool id. */
+  tool?: LookupTool
+} & (
+  | { outcome: 'ok'; operationDenied?: boolean }
+  | { outcome: 'not-allowed'; decision: 'allow' | 'ask' | 'deny'; ceiling?: 'allow' | 'ask' | 'deny' }
+  | { outcome: 'failed'; reason: 'request-failed' | 'missing-data' | 'analysis-timeout' | 'bundle-changed'; message?: string }
+  | { outcome: 'skipped'; reason: 'unclaimed-service' | 'operation-unavailable' | 'not-applicable' }
+)
+
 export type Checks = {
   policy: CheckOutcome
   validation: CheckOutcome
   schema: CheckOutcome
+  /** Optional in legacy records; at most 128 contexts, each diagnostic at most 300 characters. */
+  context?: CheckContext[]
+  contextOmitted?: number
   /** A short error from Agent Services when a check failed (untrusted; escaped when drawn). */
   error?: string
 }
@@ -211,12 +240,14 @@ export type CallOutcome = {
     reason?: string
   }[]
   /**
-   * Per root (response key) and denied field (real name): in how many distinct rows of the root's list Agent Services denied it, over every
+   * Per root (response key) and denied response path: in how many distinct rows of the root's list Agent Services denied it, over every
    * path it was denied by and whether or not the row is shown. Counted at settle; absent in outcomes stored before it was kept.
    */
   denials?: {
     root: string
     field: string
+    /** Absolute response-key path with list indices removed; absent in older records. */
+    path?: string
     /** Distinct list items the field was denied in, capped at `of`; absent when the root is not a list (the field itself is denied). */
     rows?: number
     /** The length of the list the denied items are in, when the denial paths run through exactly one list. */
@@ -262,9 +293,9 @@ export type CallOutcome = {
        * object there (`fields.status.name`); no value where the field is denied. At most 12, values at
        * most 256 characters (80 in an older history entry).
        */
-      fields?: { name: string; value?: string }[]
+      fields?: { name: string; path?: string; value?: string }[]
       /** Policy-denied fields inside this item (`email`, nested `user.email`) by real field name: at most 4, distinct. */
-      denied?: { field: string; classification?: string; isRequestable?: boolean; isExpected?: boolean; hasToken?: boolean }[]
+      denied?: { field: string; path?: string; classification?: string; isRequestable?: boolean; isExpected?: boolean; hasToken?: boolean }[]
     }[]
     more: number
   }[]
@@ -337,14 +368,82 @@ export type WeightField = {
  */
 export type CallStatus = 'pending' | 'ran' | 'errored' | 'denied' | 'interrupted'
 
-/** One Agent Services execute call as the pane draws it, keyed by its tool_use_id. */
+/** The Agent Services tools besides `execute` whose calls the pane also shows. */
+export type LookupTool = 'search' | 'introspect' | 'validate' | 'dry_run'
+
+/**
+ * What Claude asked a lookup for, each part shape-checked and bounded
+ * (src/lookup.ts). Untrusted model text: escaped when drawn.
+ */
+export type LookupInput = {
+  /** search: the terms (at most 20, each at most 200 characters). */
+  terms?: string[]
+  /** search (optional), introspect, validate: the service the call names. dry_run names one per request. */
+  scope?: string
+  /** search: reads or writes only. */
+  operationType?: 'query' | 'mutation'
+  /** introspect: the type asked for, and how many reference hops. */
+  type?: string
+  depth?: number
+  /** dry_run: each request's service, in order (at most 20). */
+  scopes?: string[]
+}
+
+/**
+ * What a lookup's response said, bounded (src/lookup.ts). The schema it
+ * returned is in the call's IR as fields; this holds the rest. Absent until
+ * the call settles with a response the mod could read.
+ */
+export type LookupCount = { kind: 'exact' | 'at-least'; value: number } | { kind: 'unknown' }
+
+export type LookupFound = {
+  /** Counts describe the source, independently of display and retention limits. */
+  counts?: { hits?: LookupCount; types?: LookupCount; fields?: LookupCount; members?: LookupCount; scopes?: LookupCount }
+  completeness?: 'complete' | 'partial' | 'unavailable'
+  /** Why locally available details do not cover the complete response. */
+  omissions?: string[]
+  /** UTF-8 bytes of the response Claude read: 0 when Claude Code saved it to a file instead. */
+  bytes: number
+  /** Claude Code kept the response out of the context (saved it to a file). */
+  isPersisted?: boolean
+  /** search: operations found in all, and the services the catalog lists (an empty search only, at most 200). */
+  hits?: number
+  scopes?: string[]
+  /** search: the paths of the operations found that are mutations (the rest are queries). */
+  mutations?: string[]
+  /** introspect: the declaration asked for; absent means the response defines no such type. Missing on older saved calls. */
+  typeKind?: 'object' | 'interface' | 'input' | 'enum' | 'scalar' | 'union' | 'absent' | 'unavailable'
+  /** introspect: the types the response defines, and enum values, input fields or union members (at most 60, as SDL writes them). */
+  types?: number
+  members?: string[]
+  /** Introspection member cards, aligned with members; absent in older stored calls. Schema text only, bounded before storage. */
+  memberDetails?: { name: string; description?: string; deprecated?: string }[]
+  /** validate: problems the compiler reported. */
+  problems?: number
+  /** dry_run: each request's service and how it fared: refused whole, or failed with Agent Services' first error (at most 1,000 characters). */
+  requests?: { scope: string; isDenied?: boolean; error?: string }[]
+  /** Descriptions were left out of what the pane keeps: the response was too large to keep them all. */
+  isTrimmed?: boolean
+  /** The response was not one the mod could read: why, in at most 300 characters. */
+  unreadable?: string
+  /** The call failed: Agent Services' first error message, in at most 300 characters. */
+  error?: string
+}
+
+/** One Agent Services call as the pane draws it, keyed by its tool_use_id: an `execute`, or a lookup (`tool`). */
 export type InspectedCall = {
   id: string
+  /** The lookup tool the call went to; absent for `execute` (and in state an older build wrote). */
+  tool?: LookupTool
+  /** What a lookup asked for. */
+  input?: LookupInput
+  /** What a lookup's response said, once it settled. */
+  found?: LookupFound
   /** The MCP server the call goes to, as the tool name spells it. */
   server: string
-  /** The operation exactly as the model sent it; escaped only when drawn. */
+  /** The operation exactly as the model sent it (a lookup: the operations it sent, or empty); escaped only when drawn. */
   operation: string
-  /** Variables as pretty JSON, or the raw text when it could not be read. */
+  /** Variables as pretty JSON, or the raw text when it could not be read (a lookup: the rest of its input). */
   variables: string
   /** Why the input could not be read, when it could not. */
   inputError?: string
@@ -380,27 +479,42 @@ export type TrustFit = { isAllowed: true; fits: RootFit[] } | { isAllowed: false
 
 /**
  * Pending calls oldest first, the last call that settled (always `history[0]`),
- * and the last 20 settled calls newest first. Entries past the newest 5 are
- * compacted (no `printed`, schema descriptions or summary debug fields), and
- * entries past the newest keep only the preview rows shown before a press.
+ * and bounded history newest first. Full models and versioned overviews live in separate session-only host state.
+ * Detail entries survive code reloads and are cleared when the session ends.
  */
 export type InspectorCalls = { queue: InspectedCall[]; last: InspectedCall | null; history: InspectedCall[] }
+
+/** A stable history address; live follows the active call rather than an array index. */
+export type SelectedCall = { kind: 'live' } | { kind: 'call'; id: string }
+export type DetailAvailability = 'available' | 'expired' | 'reloaded' | 'oversize'
+/** Compact host metadata. The operation, schema and previews live in separate session-only detail slots. */
+export type CallOverview = Pick<InspectedCall, 'id' | 'tool' | 'server' | 'status' | 'owner' | 'arrivedAt'> & {
+  overview: { headline: string; headlineSource?: 'model' | 'derived'; operationName?: string; operationKind?: OpType }
+  details: DetailAvailability
+}
+/** A bounded catalog over reusable host slots; no full model is repeated here. */
+export type CallDetailIndex = { version: 1; epoch: string; writer: string; entries: { id: string; slot: number; bytes: number }[]; active: string | null }
+/** A cleared slot keeps its epoch so stale module writes cannot resurrect old details. */
+export type CallDetailSlot = { epoch: string; writer: string; id: string; json: string | null }
+export type StoredInspectorCalls = { version: 2; writer?: string; queue: CallOverview[]; last: CallOverview | null; history: CallOverview[] }
+export type ResolvedCall = InspectedCall | CallOverview
+export type ResolvedInspectorCalls = { queue: ResolvedCall[]; last: ResolvedCall | null; history: ResolvedCall[] }
 
 declare module 'claude-code' {
   interface PluginState {
     'graphos-agent-mods': {
-      calls: InspectorCalls
+      calls: StoredInspectorCalls
+      callDetailIndex: CallDetailIndex
+      callDetails: StateFamily<CallDetailSlot | null>
       hasAutoOpened: boolean
       /** Which module instance owns the enrichment pump; an older instance's timer stops itself. */
       pumper: string
       /** Which field drawer is open; reset when a new call is shown. */
-      paneUi: { field: string | null; arg: string | null; cursor: number | null; row?: string | null; more?: string | null }
+      paneUi: { field: string | null; arg: string | null; selection: SelectedCall; cursor?: number | null; row?: string | null; more?: string | null; detail?: { callId: string; detailId: string } | null; rawPage?: number; rawAsSent?: boolean }
       /** Each settled Agent Services call's final verdict line by tool_use_id (null: none), newest last, at most 500: what its transcript row draws. */
       verdicts: Record<string, string | null>
       /** `/gas trust off` for this session: every Agent Services call asks, whatever the trust rules say. */
       isTrustOff: boolean
-      /** What the standing status line counts this session (src/view/status.ts): Agent Services calls seen, those that ran with no dialog under a trust rule, and the bytes of the responses Claude read (absent in state an older build wrote). */
-      tally: { calls: number; unasked: number; bytes?: number }
       /** The Agent Services call running with no dialog and the line the spinner reads for it (src/view/spinner.ts); `id` is empty when none is. */
       spinner: { id: string; text: string }
     }

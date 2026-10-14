@@ -21,8 +21,8 @@ describe('attentionOf', () => {
   test('personal-data field names are marked "personal data"', () => {
     const ir = call('query', [field('Query.users', { children: [field('User.emailAddress'), field('User.displayName'), field('User.id')] })])
     assert.deepEqual(attentionOf(ir), [
-      { coordinate: 'User.emailAddress', reason: 'personal data' },
-      { coordinate: 'User.displayName', reason: 'personal data' },
+      { path: 'emailAddress', coordinate: 'User.emailAddress', reason: 'personal data' },
+      { path: 'displayName', coordinate: 'User.displayName', reason: 'personal data' },
     ])
   })
 
@@ -33,16 +33,16 @@ describe('attentionOf', () => {
       }),
     ])
     assert.deepEqual(attentionOf(ir), [
-      { coordinate: 'R.excerpt', reason: 'masked' },
-      { coordinate: 'R.body', reason: 'denied' },
-      { coordinate: 'R.email', reason: 'masked' },
+      { path: 'excerpt', coordinate: 'R.excerpt', reason: 'masked' },
+      { path: 'body', coordinate: 'R.body', reason: 'denied' },
+      { path: 'email', coordinate: 'R.email', reason: 'masked' },
     ])
   })
 
   test('a mutation root is marked with no words, since its CHANGES block says what it writes; a destructive name on a query says so', () => {
-    assert.deepEqual(attentionOf(call('mutation', [field('Mutation.jira_createIssue')])), [{ coordinate: 'Mutation.jira_createIssue', reason: '' }])
-    assert.deepEqual(attentionOf(call('mutation', [field('Mutation.jira_deleteIssue')])), [{ coordinate: 'Mutation.jira_deleteIssue', reason: '' }])
-    assert.deepEqual(attentionOf(call('query', [field('Query.jira_deleteIssue')])), [{ coordinate: 'Query.jira_deleteIssue', reason: 'destructive name' }])
+    assert.deepEqual(attentionOf(call('mutation', [field('Mutation.jira_createIssue')])), [{ path: 'jira_createIssue', coordinate: 'Mutation.jira_createIssue', reason: '' }])
+    assert.deepEqual(attentionOf(call('mutation', [field('Mutation.jira_deleteIssue')])), [{ path: 'jira_deleteIssue', coordinate: 'Mutation.jira_deleteIssue', reason: '' }])
+    assert.deepEqual(attentionOf(call('query', [field('Query.jira_deleteIssue')])), [{ path: 'jira_deleteIssue', coordinate: 'Query.jira_deleteIssue', reason: 'destructive name' }])
   })
 
   test('a subscription, a no-limit read and an unknown policy mark nothing; reasons stay short', () => {

@@ -4,7 +4,7 @@ This repository publishes `graphos-agent-mods` (display name **GraphOS Agent Mod
 
 ## Safety boundaries
 
-- The mod never calls Agent Services `execute`. It may call only `search`, `introspect`, `validate`, and `dry_run`, and only after `$.tool.check` returns `allow`. Keep the guard in `hooks/register.tsx`.
+- The mod never calls Agent Services `execute`. It may call only `search`, `introspect`, `validate`, and `dry_run`, and only after `$.tool.check` returns `allow`. Keep the guard in `hooks/register.tsx`. The optional Desktop host `session_connectors_status` tool is also read-only and permission-checked; it resolves connector display names to their current tool IDs.
 - Trust rules may change only `ask` to `allow`. They cannot override `deny`, an existing `allow`, or an organization ceiling. Mutations, subscriptions, change-named roots, any directive except a resolved `@skip` or `@include`, nested differing type conditions on the same value, and unparseable operations must never fit. Changes to `src/trust.ts` need adversarial behavior coverage.
 - A saved `trust.graphql` is reported, never read or applied by the file-change handler. In-memory rules change at session start, `/gas trust`, or plugin reload. Do not add a code path that reloads the file on save.
 - Learned links may fill only an unset base, and only from verified vendor metadata in an Agent Services response. Never learn a host from user-authored content or model text. Do not replace a configured or already learned host; validate stored hosts when loading them. Changes to `src/sites.ts` or learned-base merging need adversarial coverage.
@@ -13,7 +13,7 @@ This repository publishes `graphos-agent-mods` (display name **GraphOS Agent Mod
 
 ## Architecture
 
-- `hooks/register.tsx` is the only module that calls the mod API (`$`). It registers hooks and commands, coordinates enrichment, and owns session state. Every hook matcher names the claude.ai connector's server (`claude_ai_GraphOS_Agent_Services`, `CONNECTOR` in `src/servers.ts`): a matcher on any server's tool (`mcp__.+__search`) would route every MCP server's calls through the mod.
+- `hooks/register.tsx` is the only module that calls the mod API (`$`). It registers hooks and commands, coordinates enrichment, and owns session state. Hook matchers accept the terminal connector name or Desktop UUID-shaped server IDs. Before retaining or enriching a candidate call or applying trust, discovery requires the terminal name or a connected Desktop inventory entry named exactly `GraphOS Agent Services`, plus its tool contract. Unknown identities leave calls and permissions unchanged.
 - `src/` contains the pure implementation, with no `$`:
   - parsing: `adapter.ts`, `normalize.ts`, `build.ts`;
   - Agent Services enrichment: `enrich.ts`, `gas.ts`, `annotate.ts`, `schema.ts`;

@@ -52,7 +52,7 @@ function versionSteps(version: SetupFacts['version']): Step[] {
 }
 
 function connectorSteps(servers: SetupFacts['servers']): Step[] {
-  if (servers === undefined) return [['Check the GraphOS Agent Services connector: Claude Code could not list its tools just now. Run /mcp to see whether it is connected, then /gas setup again.']]
+  if (servers === undefined) return [['Check the GraphOS Agent Services connector: Inspector could not identify its tools just now. In Desktop, connector discovery may be unavailable or not permitted. Run /mcp to see whether it is connected, then /gas setup again.']]
   if (servers.length > 0) return []
   return [[
     'Connect GraphOS Agent Services: add the "GraphOS Agent Services" connector at claude.ai (Settings, then Connectors) and sign in to it. Claude Code must be signed in to the same claude.ai account (/login); /mcp then lists it. Then run /gas setup again.',

@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { CONNECTOR, gasServers, splitMcpTool } from '../../src/servers.ts'
+import { CONNECTOR, desktopGasServers, gasServers, splitMcpTool } from '../../src/servers.ts'
 
 const mcp = (name: string) => ({ name, mcp: true })
 const full = (server: string) => ['execute', 'validate', 'introspect', 'dry_run'].map(tool => mcp(`mcp__${server}__${tool}`))
@@ -61,4 +61,21 @@ test('tools of different servers are not pooled', () => {
 
 test('gasServers of nothing is empty', () => {
   assert.equal(gasServers([]).size, 0)
+})
+
+const DESKTOP = '12345678-1234-1234-1234-123456789abc'
+const connector = { id: DESKTOP, name: 'GraphOS Agent Services', kind: 'connector', status: 'connected' }
+test('Desktop identity comes from the connected connector display name, then the full tool contract', () => {
+  const ids = desktopGasServers(JSON.stringify({ servers: [connector] }))
+  assert.deepEqual(ids, [DESKTOP])
+  assert.deepEqual([...gasServers(full(DESKTOP), ids)], [DESKTOP])
+  assert.equal(gasServers(full(DESKTOP)).size, 0)
+  assert.equal(gasServers(full(DESKTOP).slice(1), ids).size, 0)
+})
+test('Desktop ignores unrelated, disconnected, local, and invalid-ID entries', () => {
+  for (const change of [{name:'Other service'}, {name:'GraphOS Agent Services copy'}, {kind:'user'}, {status:'needs_auth'}, {id:'github'}, {id:123}]) {
+    assert.deepEqual(desktopGasServers(JSON.stringify({ servers: [{ ...connector, ...change }] })), [])
+  }
+  assert.deepEqual(desktopGasServers('{"servers":[null,{},42]}'), [])
+  for (const text of ['no json', '{}', 'null', '{"servers":{}}']) assert.throws(() => desktopGasServers(text))
 })

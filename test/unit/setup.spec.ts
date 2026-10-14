@@ -58,7 +58,7 @@ test('no connector is the one step, says how to connect the claude.ai one, and c
   assert.match(report, /Apollo MCP Server.*does not provide/)
   assert.doesNotMatch(report, /mcp__/)
   // A listing that failed is not the same as no connector.
-  assert.match(steps(setupReport({ ...DONE, servers: undefined, tools: [] }))[0] ?? '', /could not list its tools.*\/mcp/)
+  assert.match(steps(setupReport({ ...DONE, servers: undefined, tools: [] }))[0] ?? '', /could not identify.*\/mcp/)
 })
 
 test('the read-only tools are never a step: not allowed, denied or capped, the report is ready and says so in a note', () => {

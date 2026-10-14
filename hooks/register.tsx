@@ -33,7 +33,7 @@ import { versionNote } from '../src/version.ts'
 import { OPEN_TIMEOUT_MS, openArgv } from '../src/open.ts'
 import { navResolvedOf, selectionOlder, selectionNewer, shownResolvedAt, arrive, EMPTY, isExecute, isFinal, patchAgent, patchIR, patchLookup, patchOutcome, patchTrust, settle, settleOrphans, statusOf } from '../src/queue.ts'
 import { MAX_SAVED, outcomeOf, pickResult, responseIn, savedOutcome, truncationOf } from '../src/result.ts'
-import { gasServers, splitMcpTool } from '../src/servers.ts'
+import { desktopGasServers, gasServers, splitMcpTool } from '../src/servers.ts'
 import { buildLookupPrompt, buildPrompt, cacheKey, MAX_TOKENS, parseSummary, summarySystemPrompt } from '../src/summary.ts'
 import type { CallIR, LookupTool, Summary } from '../src/ir.ts'
 import { CLOSED, RawView, viewOf } from '../src/view.tsx'
@@ -56,10 +56,11 @@ import { findCall, planSnapshots } from '../src/snapshot/write.ts'
 import type { SnapshotOptions } from '../src/snapshot/options.ts'
 
 const PANE = 'gas'
-// The claude.ai connector's tools (src/servers.ts CONNECTOR; the hook matchers spell it inline): no other server's calls reach the hooks.
-const EXECUTE_TOOL = /^mcp__claude_ai_GraphOS_Agent_Services__execute$/
+// Candidate tools: the terminal connector name or Desktop UUIDs. Discovery verifies
+// the connector identity before retaining a call, enriching it, or applying trust.
+const EXECUTE_TOOL = /^mcp__(?:claude_ai_GraphOS_Agent_Services|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})__execute$/
 // Its tools whose calls the pane shows: execute, and the lookups beside it.
-const GAS_TOOL = /^mcp__claude_ai_GraphOS_Agent_Services__(?:execute|search|introspect|validate|dry_run)$/
+const GAS_TOOL = /^mcp__(?:claude_ai_GraphOS_Agent_Services|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})__(?:execute|search|introspect|validate|dry_run)$/
 const TITLE = 'GraphOS Inspector'
 // The raw operation of the call shown, in its own docked pane.
 const RAW_PANE = 'gas-raw'
@@ -295,6 +296,7 @@ const paneUi = atom({ plugin: 'graphos-agent-mods', key: 'paneUi' } as const, CL
 // because a server may have connected since the previous lookup.
 const SERVERS_TTL_MS = 30_000
 let servers: Set<string> | undefined
+let serversAt: number | undefined
 // When a listing last said each server is not Agent Services ($.clock time).
 const misses = new Map<string, number>()
 // The listing in flight, shared by every row drawing at once.
@@ -875,21 +877,45 @@ async function draftPrompt($: EngineInterface, draft: string, what = 'the access
   if (why !== undefined) $.ui.log(`GraphOS Inspector could not draft ${what}: ${why}.`)
 }
 
+/** Desktop's read-only host inventory supplies the display-name → tool-ID mapping.
+ * It is optional: missing/denied/broken discovery never grants a call permission.
+ */
+async function discoverGasServers($: EngineInterface): Promise<Set<string>> {
+  const tools = await $.tool.list()
+  const terminal = gasServers(tools)
+  const tool = 'mcp__ccd_connectors__session_connectors_status'
+  if (!tools.some(t => t.mcp && t.name === tool)) return terminal
+  try {
+    const ids = await withinStep($, 'Desktop connector discovery', (async () => {
+      const verdict = await $.tool.check({ tool, input: {} })
+      if (!isAllowedWithoutPrompt(verdict)) throw new Error('Desktop connector inventory is not allowed')
+      const result = await $.tool.call({ tool })
+      if (result.isError || typeof result.text !== 'string') throw new Error('Desktop connector inventory failed')
+      return desktopGasServers(result.text)
+    })(), 2_000)
+    return gasServers(tools, ids)
+  } catch (error) {
+    if (terminal.size > 0) return terminal
+    throw error
+  }
+}
+
 async function isGasServer($: EngineInterface, server: string, options: { isFresh?: boolean } = {}): Promise<boolean> {
   const token = generation
-  if (servers?.has(server)) return true
   const now = await $.clock.now().catch(() => undefined)
+  if (options.isFresh !== true && servers?.has(server) && now !== undefined && serversAt !== undefined && now - serversAt < SERVERS_TTL_MS) return true
   const missedAt = misses.get(server)
   if (options.isFresh !== true && now !== undefined && missedAt !== undefined && now - missedAt < SERVERS_TTL_MS) return false
   if (token !== generation) return false
   if (listing === undefined) {
-    const pending = $.tool.list().then(gasServers)
+    const pending = discoverGasServers($)
     listing = pending
     void pending.finally(() => { if (listing === pending) listing = undefined }).catch(() => undefined)
   }
   const found = await listing
   if (token !== generation) return false
   servers = found
+  serversAt = now
   if (found.has(server)) misses.delete(server)
   else if (now !== undefined) misses.set(server, now)
   return found.has(server)
@@ -1275,7 +1301,7 @@ async function checkExecute($: EngineInterface, e: Args<'tool.check'>, verdict: 
   // evidence side effects, so an answer arriving after the deadline cannot
   // claim that the original ask was allowed by a trust rule.
   const evaluate = async (): Promise<Fit | undefined> => {
-    if (!(await isGasServer($, server)) || token !== generation) return undefined
+    if (!(await isGasServer($, server, { isFresh: true })) || token !== generation) return undefined
     await ensureTrust($)
     if (trustRules.length === 0 || (await read($, isTrustOff)) || token !== generation) return undefined
     return fitCall(e.input, trustRules)
@@ -1557,7 +1583,7 @@ async function setupText($: EngineInterface): Promise<string> {
   const version = await claudeVersion($)
   let servers: string[] | undefined
   try {
-    servers = [...gasServers(await $.tool.list())]
+    servers = [...await discoverGasServers($)]
   } catch {
     servers = undefined
   }
@@ -1714,7 +1740,7 @@ function clearSessionMemory() {
   taskStops.clear()
   attempted.clear(); caches.clear(); summaries.clear()
   verdicts.clear(); resultBlocks.clear()
-  servers = undefined; misses.clear(); listing = undefined
+  servers = undefined; serversAt = undefined; misses.clear(); listing = undefined
   faulted.clear(); endedSpinners.clear()
   trustRules = []; trustLoad = undefined
   hasLoadedLinks = false; linkConfig = configOf()
@@ -1868,7 +1894,7 @@ export const register: Register = (on, options) => {
     return { text: opened.isPlaced ? 'GraphOS Inspector opened.' : 'GraphOS Inspector could not open here.' }
   })
 
-  on('tool.call', { tool: /^mcp__claude_ai_GraphOS_Agent_Services__(?:execute|search|introspect|validate|dry_run)$/ }, async ($, e, next) => {
+  on('tool.call', { tool: /^mcp__(?:claude_ai_GraphOS_Agent_Services|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})__(?:execute|search|introspect|validate|dry_run)$/ }, async ($, e, next) => {
     // Forward before touching discovery, storage, timers, or observation metadata.
     let forwarded: ReturnType<typeof next>
     try { forwarded = next(e) }
@@ -1901,7 +1927,7 @@ export const register: Register = (on, options) => {
   // Trust rules may lift an execute's ask to allow. Preserve existing allow/deny decisions,
   // organization ceilings, and the engine's verdict if matching fails. A lookup's
   // verdict is the engine's, untouched. Any call still asking opens the pane (openForDialog).
-  on('tool.check', { tool: /^mcp__claude_ai_GraphOS_Agent_Services__(?:execute|search|introspect|validate|dry_run)$/ }, async ($, e, next) => {
+  on('tool.check', { tool: /^mcp__(?:claude_ai_GraphOS_Agent_Services|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})__(?:execute|search|introspect|validate|dry_run)$/ }, async ($, e, next) => {
     const token = generation
     const verdict = await next(e)
     if (token !== generation) return verdict
@@ -1967,7 +1993,7 @@ export const register: Register = (on, options) => {
   // its own ToolUse row, or folded into a ToolGroup's one line.
   // Every Agent Services call has one, a lookup's included; an expanded group's rows are
   // ToolUse rows of their own, which carry the line, so the group does not.
-  on('ui.render', { component: 'ToolUse', props: { tool: /^mcp__claude_ai_GraphOS_Agent_Services__(?:execute|search|introspect|validate|dry_run)$/ } }, async ($, e, next) => {
+  on('ui.render', { component: 'ToolUse', props: { tool: /^mcp__(?:claude_ai_GraphOS_Agent_Services|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})__(?:execute|search|introspect|validate|dry_run)$/ } }, async ($, e, next) => {
     const drawn = await next(e)
     const texts = await verdictsOf($, [e.props])
     if (texts.length === 0) return drawn
@@ -1976,7 +2002,7 @@ export const register: Register = (on, options) => {
   })
   // A folded group draws no result of its own, so each call that has a RESULT
   // block (below) has it under its verdict line here, call by call.
-  on('ui.render', { component: 'ToolGroup', props: { isExpanded: false, calls: { tool: /^mcp__claude_ai_GraphOS_Agent_Services__(?:execute|search|introspect|validate|dry_run)$/ } } }, async ($, e, next) => {
+  on('ui.render', { component: 'ToolGroup', props: { isExpanded: false, calls: { tool: /^mcp__(?:claude_ai_GraphOS_Agent_Services|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})__(?:execute|search|introspect|validate|dry_run)$/ } } }, async ($, e, next) => {
     const drawn = await next(e)
     const entries: { texts: string[]; block: ResultBlock | undefined }[] = []
     for (const call of e.props.calls) {
@@ -2004,7 +2030,7 @@ export const register: Register = (on, options) => {
   // not docked and for scrollback. A standalone row's result is this event; an
   // expanded group draws each call's output inside its ToolUse row, which this
   // does not reach. Only a call that ran and whose response was read gets one.
-  on('ui.render', { component: 'ToolResult', props: { tool: /^mcp__claude_ai_GraphOS_Agent_Services__execute$/ } }, async ($, e, next) => {
+  on('ui.render', { component: 'ToolResult', props: { tool: /^mcp__(?:claude_ai_GraphOS_Agent_Services|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})__execute$/ } }, async ($, e, next) => {
     const drawn = await next(e)
     const block = await resultBlockOfRow($, e.props.tool, e.props.tool_use_id)
     if (block === undefined) return drawn

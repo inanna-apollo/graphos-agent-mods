@@ -520,3 +520,10 @@ declare module 'claude-code' {
     }
   }
 }
+
+// Optional Desktop host tool; discovery checks its availability and permission first.
+declare module 'claude-code' {
+  interface McpToolInputs {
+    mcp__ccd_connectors__session_connectors_status: {}
+  }
+}

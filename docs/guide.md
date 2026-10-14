@@ -149,3 +149,9 @@ claude plugin update graphos-agent-mods@graphos-experiments
 ```
 
 Marketplace updates are not automatic by default. The Marketplaces tab can enable auto-update.
+
+### Desktop connector discovery
+
+Desktop names connector tools with a per-connection ID. Inspector resolves that ID through Desktop's read-only connector-status tool, requiring a connected connector named **GraphOS Agent Services** and the expected Agent Services tools. It checks permission before reading this inventory. Terminal installations retain their existing connector-name discovery.
+
+If Desktop's inventory is unavailable, denied, or malformed, Inspector leaves tool calls and permissions unchanged. `/gas setup` reports that identification failed; check `/mcp` and retry setup. This integration depends on Desktop's connector-status tool and does not hardcode an account's connection ID. Connector names are routing metadata, not proof of the remote service's identity.

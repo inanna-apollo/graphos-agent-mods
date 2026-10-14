@@ -21,6 +21,9 @@ const SHIPPED = '[bases]\natlassian = ""\nslack = ""\n'
 const ONE_RULE = 'query DocsLookup { confluence_search(cql: "type = page*", limit: 25) { results { title } } }\n'
 
 type Setup = {
+  desktopStatus?: string | Error
+  holdDesktopStatus?: boolean
+
   version?: string | 'throw'
   tools?: { name: string; description: string; mcp: boolean }[]
   /** The tool.check answer for a read-only tool, by its name; allow when absent. */
@@ -46,6 +49,11 @@ function world(on: On, setup: Setup = {}) {
     if (setup.version === 'throw') throw new Error('no such call')
     const version = setup.version ?? '2.1.292'
     return { value: { version, base: version } }
+  })
+  on('tool.call', { tool: 'mcp__ccd_connectors__session_connectors_status' }, async () => {
+    if (setup.holdDesktopStatus) await new Promise<void>(() => {})
+    if (setup.desktopStatus instanceof Error) throw setup.desktopStatus
+    return { result: [], text: setup.desktopStatus ?? '' }
   })
   on('tool.list', () => ({ value: setup.tools ?? GAS_TOOLS }))
   on('tool.check', (_, e) => ({ decision: setup.check?.(e.tool.split('__').at(-1) ?? '') ?? ('allow' as const) }))
@@ -186,4 +194,30 @@ test('a prompt box that refuses the draft is said in the report', async ($, on) 
   const report = await setup($)
   expect(report).toContain('close the open dialog')
   expect(seen.fills).toEqual([])
+})
+
+const DESKTOP = '12345678-1234-1234-1234-123456789abc'
+const STATUS = { name: 'mcp__ccd_connectors__session_connectors_status', description: '', mcp: true }
+const desktopTools = [...GAS_TOOLS.map(t => ({ ...t, name: t.name.replace(SERVER, DESKTOP) })), STATUS]
+test('Desktop setup resolves the named connector to its current UUID', async ($, on) => {
+  world(on, { tools: desktopTools, desktopStatus: JSON.stringify({ servers: [{ name: 'GraphOS Agent Services', kind: 'connector', status: 'connected', id: DESKTOP }] }), userLinks: BOTH_SITES })
+  await start($)
+  expect(await setup($)).toMatch(READY)
+})
+for (const failure of ['malformed', 'denied', 'throw'] as const) test(`Desktop ${failure} discovery reports uncertainty rather than a missing connector`, async ($, on) => {
+  world(on, { tools: desktopTools, desktopStatus: failure === 'throw' ? new Error('unavailable') : 'invalid JSON', check: tool => failure === 'denied' && tool === 'session_connectors_status' ? 'deny' : 'allow' })
+  await start($)
+  const report = await setup($)
+  expect(report).toContain('could not identify')
+  expect(report).not.toContain('add the')
+})
+
+test('Desktop inventory that never answers cannot hold setup indefinitely', async ($, on) => {
+  const seen = world(on, { tools: desktopTools, holdDesktopStatus: true })
+  await start($)
+  let report: string | undefined
+  const pending = setup($).then(value => { report = value })
+  for (let step = 0; step < 40 && report === undefined; step++) await seen.clock.advance(100)
+  expect(report).toContain('could not identify')
+  await pending
 })
